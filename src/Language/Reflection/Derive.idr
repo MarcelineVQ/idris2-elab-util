@@ -122,6 +122,14 @@ implDecl g f = let (MkInterfaceImpl iname vis opts impl type) = f g
                 in ( interfaceHintOpts vis opts function type
                    , def function [var function .= impl] )
 
+private
+implDecl' : DeriveUtil -> (DeriveUtil -> Elab InterfaceImpl) -> Elab (Decl,Decl)
+implDecl' g f = do (MkInterfaceImpl iname vis opts impl type) <- f g
+                   let function = implName g iname
+
+                   pure $ ( interfaceHintOpts vis opts function type
+                          , def function [var function .= impl] )
+
 ||| Generates a list of pairs of declarations for the
 ||| implementations of the interfaces specified.
 |||
@@ -139,12 +147,29 @@ deriveDecls name fs = mkDecls <$> getParamInfo' name
         mkDecls pi = let g = genericUtil pi
                       in map (implDecl g) fs
 
+export
+deriveDecls' : Name -> List (DeriveUtil -> Elab InterfaceImpl) -> Elab $ List (Decl,Decl)
+deriveDecls' name fs = do p <- getParamInfo' name -- using >>= here instead causes script failures?
+                          mkDecls p
+  where mkDecls : ParamTypeInfo -> Elab (List (Decl,Decl))
+        mkDecls pi = let g = genericUtil pi
+                     in  traverse (implDecl' g) fs
+
 ||| Given a name of a data type plus a list of interfaces, tries
 ||| to implement these interfaces automatically using
 ||| elaborator reflection.
 |||
 ||| Again, see Doc.Generic4 for a tutorial and examples how
 ||| to use this.
+export
+derive' : Name -> List (DeriveUtil -> Elab InterfaceImpl) -> Elab ()
+derive' name fs = do decls <- deriveDecls' name fs
+                     -- Declare types first. Then declare implementations.
+                     declare $ map fst decls
+                     declare $ map snd decls
+
+
+
 export
 derive : Name -> List (DeriveUtil -> InterfaceImpl) -> Elab ()
 derive name fs = do decls <- deriveDecls name fs

@@ -1,7 +1,7 @@
 package elab-util
 
 authors    = "stefan-hoeck"
-version    = 0.5.0
+version    = 0.6.0
 readme     = "README.md"
 license    = "BSD-2 Clause"
 
@@ -10,8 +10,11 @@ depends    = base    >= 0.5.1
            , contrib >= 0.5.1
 
 modules = Language.Reflection.Derive
+        , Language.Reflection.Derive.Functor
         , Language.Reflection.Pretty
         , Language.Reflection.Refined
         , Language.Reflection.Refined.Util
         , Language.Reflection.Syntax
         , Language.Reflection.Types
+
+main = Language.Reflection.Derive.Newtype

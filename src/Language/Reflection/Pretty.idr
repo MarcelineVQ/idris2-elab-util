@@ -461,8 +461,8 @@ Pretty TypeInfo where
 
 export covering
 Pretty ExplicitArg where
-  prettyPrec p (MkExplicitArg n tpe paramTypes isRecursive) =
-    applyH p "MkExplicitArg" [n, tpe, paramTypes, isRecursive]
+  prettyPrec p (MkExplicitArg n tpe paramTypes isRecursive count) =
+    applyH p "MkExplicitArg" [n, tpe, paramTypes, isRecursive, count]
 
 export covering
 Pretty ParamCon where

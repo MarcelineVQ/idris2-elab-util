@@ -118,6 +118,9 @@ record ExplicitArg where
   ||| makes an appearance in `tpe`
   isRecursive : Bool
 
+  ||| Linearity count of the argument
+  uses : Count
+
 ||| Constructor of a parameterized data type.
 |||
 ||| We only accept two types of arguments for
@@ -293,8 +296,8 @@ argPairs dt con names = run names
                               ns@(_::_) => ((n,a) ::) <$> delete m ns
 
         mkArg : NamedArg -> Res ExplicitArg
-        mkArg (MkArg _ ExplicitArg n t) = let (t',ts,isD) = inspect dt names t
-                                           in Right $ MkExplicitArg n t' ts isD
+        mkArg (MkArg c ExplicitArg n t) = let (t',ts,isD) = inspect dt names t
+                                           in Right $ MkExplicitArg n t' ts isD c
         mkArg (MkArg _ _ n _)           = implicitErr con n
 
         run : Vect k (Name,a) -> List NamedArg -> Res $ List ExplicitArg
