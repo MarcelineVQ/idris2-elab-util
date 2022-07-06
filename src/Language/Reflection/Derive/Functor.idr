@@ -122,6 +122,7 @@ data F1 a b = MkF1 (a -> b)
 
 data F1' a b c = MkF1' (a -> b -> c)
 
+public export
 data F2 a b c = EmptyF2 | PureF2 a | MkF2 c (a -> b)
 
 data F2' : Type -> Type -> Nat -> Type -> Type where
@@ -422,6 +423,7 @@ genFoldMapTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
                               then [impossibleClause `(_)]
                               else clauses)
   where
+    -- countLevels is what's filtering un-needed arguments while it also checks the depth of foldMaps needed
     doRule : ExplicitArg -> Maybe TTImp
     doRule (MkExplicitArg name tpe paramTypes isRecursive _) =
       [| (appLevels fn `(foldMap) <$> countLevels t tpe) .$ Just (toBasicName' name) |]
@@ -437,6 +439,12 @@ genFoldMapTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
     clauses : List Clause
     clauses = zipWith (.=) (lhss g.typeInfo.cons) (rhss g.typeInfo.cons)
 
+-- This should actually quote a known Foldable and edit it via field-name, to keep up-to-date automatically.
+-- e.g.
+-- let x : Foldbale (List Char)
+--     x = %search
+-- z <- quote x
+-- impl = [edit foldr field and foldMap fields] z
 mkFoldableImpl : DeriveUtil -> TTImp
 mkFoldableImpl g = `(MkFoldable 
                        defaultFoldr
@@ -452,7 +460,7 @@ mkFoldableImpl g = `(MkFoldable
 ||| and visibility.
 export
 FoldableVis : Visibility -> DeriveUtil -> Elab InterfaceImpl
-FoldableVis vis g = if hasOneHoleShape' (g.typeInfo)
+FoldableVis vis g = if hasOneHoleShape' (g.typeInfo) {- also check that no function types use the hole type -}
     then pure $ MkInterfaceImpl "Foldable" vis [] (mkFoldableImpl g) (oneHoleImplementationType `(Foldable) g)
     else fail $ show g.typeInfo.name ++ "'s type does not end in Type -> Type, and so cannot derive Foldable."
                     
@@ -460,6 +468,53 @@ FoldableVis vis g = if hasOneHoleShape' (g.typeInfo)
 export
 Foldable : DeriveUtil -> Elab InterfaceImpl
 Foldable = FoldableVis Public
+
+-- special case for no cons: impossible pattern
+-- special case for phantoms: _ = belive_me, phantoms use their target var nowhere
+-- do these cases make sense for Foldable?
+export
+genTraverseTT : DeriveUtil -> (funImpl : Name) -> (target : Name) -> TTImp
+genTraverseTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
+                     then `(believe_me)
+                     else lambdaArg "x" .=> iCase (var "x") implicitFalse
+                          (if length g.typeInfo.cons == 0
+                              then [impossibleClause `(_)]
+                              else clauses)
+  where
+    -- countLevels is what's filtering un-needed arguments while it also checks the depth of foldMaps needed
+    doRule : ExplicitArg -> TTImp
+    doRule (MkExplicitArg name tpe paramTypes isRecursive _) = fromMaybe (toBasicName' name) $
+      [| (appLevels fn `(traverse) <$> countLevels t tpe) .$ Just (toBasicName' name) |]
+
+
+    lhss : List ParamCon -> List TTImp
+    lhss = map (\pc => appNames pc.name (map (toBasicName . name) pc.explicitArgs))
+
+    rhss : List ParamCon -> List TTImp
+    rhss = map (\pc => foldl (\acc,x => `(~acc <*> ~x)) `(pure ~(var pc.name))
+                 (map doRule pc.explicitArgs))
+
+    clauses : List Clause
+    clauses = zipWith (.=) (lhss g.typeInfo.cons) (rhss g.typeInfo.cons)
+
+mkTraversableImpl : DeriveUtil -> TTImp
+mkTraversableImpl g = `(MkTraversable
+                       (\f => ~(genTraverseTT g "f" (fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params)))
+                       )
+
+-- This should reject types where the last arg is used in functions
+||| Derives a `Traversable` implementation for the given data type
+||| and visibility.
+export
+TraversableVis : Visibility -> DeriveUtil -> Elab InterfaceImpl
+TraversableVis vis g = if hasOneHoleShape' (g.typeInfo) {- also check that no function types use the hole type -}
+    then pure $ MkInterfaceImpl "Traversable" vis [] (mkTraversableImpl g) (oneHoleImplementationType `(Traversable) g)
+    else fail $ show g.typeInfo.name ++ "'s type does not end in Type -> Type, and so cannot derive Traversable."
+                    
+||| Alias for `EqVis Public`.
+export
+Traversable : DeriveUtil -> Elab InterfaceImpl
+Traversable = TraversableVis Public
 
 -- for Foo a = MkFoo a  get con infos
 -- filter each con for whether they mention `a` mebership
@@ -479,28 +534,10 @@ getStuff n = do
   -- logMsg "usedArgs" 0 $ show usedArgs
   let g = genericUtil eff
   -- let b = doFunctor eff g
-  let r = oneHoleImplementationType `(Foldable) g
+  let r = oneHoleImplementationType `(Traversable) g
   let b = implementationType `(Eq) g
-  -- logTerm "freafo" 0 "" $ impl b
-  -- logTerm "freafo" 0 "" $ type b
-  -- logTerm "freafo1" 0 "" $ type b
-  -- logTerm "functorType" 0 "" $ r
+  let r = mkTraversableImpl g
   logMsg "functorType" 0 $ show r
-  logMsg "functorType" 0 $ show usedArgs
-  logMsg "functorType" 0 $ show g.argTypesWithParams
-  logMsg "functorType" 0 $ show (mkFoldableImpl g)
-  let arg = (fromMaybe "notAFoldableType" . map fst $ last' g.typeInfo.params)
-  let b' = concatMap explicitArgs $ g.typeInfo.cons
-  let b = filter (not . isRecursive) $ b'
-      c = (concatMap paramTypes b)
-      c' = any (\case IVar _ na => na == arg; _ => False) c
-  logMsg "functorType1" 0 $ show arg
-  logMsg "functorType3" 0 $ show $ map name b'
-  logMsg "functorType2" 0 $ show $ map name b
-  logMsg "functorType4" 0 $ show c
-  logMsg "functorType5" 0 $ show c'
-  logMsg "functorType5" 0 $ show $ isPhantomArg arg g
-  logMsg "functorType6" 0 $ show . length $ g.typeInfo.cons
 
   
   -- logMsg "functorType" 0 $ show eff.name
@@ -602,15 +639,33 @@ infoH = getParamInfo "H"
 --   fmap f (S1 bs)    = S1 (fmap f bs)
 --   fmap f (S2 (p,q)) = S2 (a, fmap f q)
 
+%runElab getStuff `{Tree1}
+
+
 %runElab derive' `{FooA} [Functor]
 %runElab derive' `{FooA'} [Foldable]
 %runElab derive' `{FooA2} [Foldable]
 %runElab derive' `{FooA3} [Foldable]
 %runElab derive' `{FooAF} [Foldable]
 %runElab derive' `{F2} [Foldable]
-%runElab derive' `{Tree1} [Foldable]
+%runElab derive' `{Tree1} [Foldable,Traversable]
 %runElab derive' `{Tree2} [Foldable]
 %runElab derive' `{Tree3} [Foldable]
+
+Traversable Tree1 where
+  -- traverse f Leaf1 = [| Leaf1 |]
+  traverse f Leaf1 = pure Leaf1
+  -- traverse f (Branch1 x y z) = [| Branch1 (traverse f x) (f y) (traverse f z) |]
+  traverse f (Branch1 x y z) = pure Branch1 <*> traverse f x <*> f y <*> traverse f z
+
+
+
+
+Traversable Tree2 where
+  traverse f x = ?dfsdf2
+
+Traversable Tree3 where
+  traverse f x = ?dfsdf3
 
 -- %runElab derive `{FooA2} [Functor]
 -- %runElab derive `{FooA3} [Functor]

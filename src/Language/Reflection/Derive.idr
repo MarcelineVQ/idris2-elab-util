@@ -147,6 +147,8 @@ deriveDecls name fs = mkDecls <$> getParamInfo' name
         mkDecls pi = let g = genericUtil pi
                       in map (implDecl g) fs
 
+-- This has been changed to Elab InterfaceImpl because we might need to do extra
+-- checks/queries in Elab while constructing the interface impls
 export
 deriveDecls' : Name -> List (DeriveUtil -> Elab InterfaceImpl) -> Elab $ List (Decl,Decl)
 deriveDecls' name fs = do p <- getParamInfo' name -- using >>= here instead causes script failures?
