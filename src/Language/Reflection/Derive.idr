@@ -122,7 +122,7 @@ implDecl g f = let (MkInterfaceImpl iname vis opts impl type) = f g
                 in ( interfaceHintOpts vis opts function type
                    , def function [var function .= impl] )
 
-private
+private -- this needs to provide UniqueSearch
 implDecl' : DeriveUtil -> (DeriveUtil -> Elab InterfaceImpl) -> Elab (Decl,Decl)
 implDecl' g f = do (MkInterfaceImpl iname vis opts impl type) <- f g
                    let function = implName g iname

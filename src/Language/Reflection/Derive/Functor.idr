@@ -142,17 +142,17 @@ data F4 a b = MkF4 (b -> a)
 data F5 : (f : Type -> Type) -> Type -> Type -> Type where
   MkF5 : (b -> f a) -> (a -> f b) -> F5 f a b
 
-Functor Tree1 where
-  map f Leaf1 = Leaf1
-  map f (Branch1 x y z) = Branch1 (map f x) (f y) (map f z)
+-- Functor Tree1 where
+--   map f Leaf1 = Leaf1
+--   map f (Branch1 x y z) = Branch1 (map f x) (f y) (map f z)
 
-Functor Tree2 where
-  map f (Leaf2 x) = Leaf2 (f x)
-  map f (Branch2 x z) = Branch2 (map f x) (map f z)
+-- Functor Tree2 where
+--   map f (Leaf2 x) = Leaf2 (f x)
+--   map f (Branch2 x z) = Branch2 (map f x) (map f z)
 
-Functor Tree3 where
-  map f Leaf3 = Leaf3
-  map f (Branch3 x y z) = Branch3 (map f x) (f y) (map f z)
+-- Functor Tree3 where
+--   map f Leaf3 = Leaf3
+--   map f (Branch3 x y z) = Branch3 (map f x) (f y) (map f z)
 
 Functor (F2 a b) where
   map f EmptyF2 = EmptyF2
@@ -198,6 +198,9 @@ hasOneHoleShape' : ParamTypeInfo -> Bool
 hasOneHoleShape' pt = case last' (params pt) of
                    Just (_, IType _) => True; _ => False
 
+hasOneHoleShape'' : ParamTypeInfo -> Maybe (Name,TTImp)
+hasOneHoleShape'' pt = last' (params pt)
+
 init' : List a -> List a
 init' (x :: xs@(_ :: _)) = x :: init xs
 init' [x] = []
@@ -210,29 +213,6 @@ record FParamTypeInfo where
   name   : Name
   params : List1 (Name,TTImp)
   cons   : List ParamCon
-
-record DeriveUtil' where
-  constructor MkDeriveUtil
-
-  ||| The underlying type info containing the list and names
-  ||| of data constructors plus their arguments as well as
-  ||| the data type's name and type arguments.
-  typeInfo           : FParamTypeInfo
-
-  ||| Split fully applied data type, i.e. (`var "Either" .$ var "a", var "b")
-  oneHoleAppliedType        : (TTImp,TTImp)
-
-  ||| The names of type parameters
-  paramNames         : List1 Name
-
-  ||| Types of constructor arguments where at least one
-  ||| type parameter makes an appearance. These are the
-  ||| `tpe` fields of `ExplicitArg` where `hasParam`
-  ||| is set to true and `isRecursive` is set
-  ||| to false. See the documentation of `ExplicitArg`
-  ||| when this is the case
-  argTypesWithParams : List TTImp
-
 
 data Foo' : (Type -> Type -> Type) -> Type -> (Type -> Type) -> Type -> Type where
   MkFoo' : g (f b) a -> f a -> a -> Foo' g b f a
@@ -262,13 +242,12 @@ argTypesWithParamsAndApps l ss = mapMaybe slice ss
     slice _ = Nothing
 
 export
-oneHoleImplementationType : (iface : TTImp) -> DeriveUtil -> TTImp
-oneHoleImplementationType iface (MkDeriveUtil _ appTp names argTypesWithParams) =
+oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> DeriveUtil -> TTImp
+oneHoleImplementationType iface reqs (MkDeriveUtil _ appTp names argTypesWithParams) =
     let (vars,l) = dropLastVar appTp
         appIface = iface .$ vars
-        mapTemplate = appIface
         functorVars = argTypesWithParamsAndApps l argTypesWithParams
-        autoArgs = piAllAuto appIface $ map (iface .$) functorVars
+        autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) vars) reqs
      in piAllImplicit autoArgs (init' names)
   where
     dropLastVar : TTImp -> (TTImp,TTImp)
@@ -329,6 +308,28 @@ isTuple (IApp _ s u) = isTuple s
 isTuple (IVar _ nm) = if toBasicName nm == "Pair" then True else False
 isTuple _ = False
 
+isLastParamInPi : (target : TTImp) -> (body : TTImp) -> Bool
+isLastParamInPi t (IPi fc rig pinfo mnm argTy retTy) = t == argTy || t == retTy || isLastParamInPi t retTy
+isLastParamInPi t (IApp fc s u) = isLastParamInPi t s || isLastParamInPi t u
+isLastParamInPi t tt = False
+
+isLeftParamOfPi : (target : TTImp) -> (body : TTImp) -> Bool
+isLeftParamOfPi t (IPi fc rig pinfo mnm argTy retTy) = t == argTy || isLeftParamOfPi t retTy
+isLeftParamOfPi t (IApp fc s u) = isLeftParamOfPi t s || isLeftParamOfPi t u
+isLeftParamOfPi t tt = False
+
+failDerive : (where' : String) -> (why : String) -> String
+failDerive where' why = "Failure deriving \{where'}: \{why}"
+
+piFail : String -> (dtName : String) -> String
+piFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used in a function type."
+
+contraFail : (impl : String) -> (dtName : String) -> String
+contraFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used contravariantly in a function type."
+
+oneHoleFail : (impl : String) -> (dtName : String) -> String
+oneHoleFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its type does not end in Type -> Type."
+
 -- make a pattern for each constructor based on the type, fill the rhs in based on the rules
 -- special case for phantoms: _ = believe_me, phantoms use their target var nowhere
 -- special case for no cons: impossible pattern
@@ -374,9 +375,12 @@ mkFunctorImpl g = `(MkFunctor) .$ (lambdaArg "f" .=> (genMapTT g "f" (fromMaybe 
 export
 FunctorVis : Visibility -> DeriveUtil -> Elab InterfaceImpl
 FunctorVis vis g = do
-  if hasOneHoleShape' (g.typeInfo)
-    then pure $ MkInterfaceImpl "Functor" vis [] (mkFunctorImpl g) (oneHoleImplementationType `(Functor) g)
-    else fail $ show g.typeInfo.name ++ "'s type does not end in Type -> Type, and so cannot derive Functor."
+    let d = fromMaybe "notAFunctorType" . map fst $ last' g.typeInfo.params
+        e = any (isLeftParamOfPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
+        dtName = nameStr $ g.typeInfo.name
+    when e $ fail (contraFail "Functor" dtName)
+    unless (hasOneHoleShape' (g.typeInfo)) $ fail (oneHoleFail "Functor" dtName)
+    pure $ MkInterfaceImpl "Functor" vis [] (mkFunctorImpl g) (oneHoleImplementationType `(Functor) [] g)
 
 ||| Alias for `EqVis Public`.
 export
@@ -460,10 +464,14 @@ mkFoldableImpl g = `(MkFoldable
 ||| and visibility.
 export
 FoldableVis : Visibility -> DeriveUtil -> Elab InterfaceImpl
-FoldableVis vis g = if hasOneHoleShape' (g.typeInfo) {- also check that no function types use the hole type -}
-    then pure $ MkInterfaceImpl "Foldable" vis [] (mkFoldableImpl g) (oneHoleImplementationType `(Foldable) g)
-    else fail $ show g.typeInfo.name ++ "'s type does not end in Type -> Type, and so cannot derive Foldable."
-                    
+FoldableVis vis g = do
+    let d = fromMaybe "notAFoldableType" . map fst $ last' g.typeInfo.params
+        e = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
+        dtName = nameStr $ g.typeInfo.name
+    when e $ fail (piFail "Foldable" dtName)
+    unless (hasOneHoleShape' (g.typeInfo)) $ fail (oneHoleFail "Foldable" dtName)
+    pure $ MkInterfaceImpl "Foldable" vis [] (mkFoldableImpl g) (oneHoleImplementationType `(Foldable) [`{Functor}] g)
+
 ||| Alias for `EqVis Public`.
 export
 Foldable : DeriveUtil -> Elab InterfaceImpl
@@ -507,10 +515,14 @@ mkTraversableImpl g = `(MkTraversable
 ||| and visibility.
 export
 TraversableVis : Visibility -> DeriveUtil -> Elab InterfaceImpl
-TraversableVis vis g = if hasOneHoleShape' (g.typeInfo) {- also check that no function types use the hole type -}
-    then pure $ MkInterfaceImpl "Traversable" vis [] (mkTraversableImpl g) (oneHoleImplementationType `(Traversable) g)
-    else fail $ show g.typeInfo.name ++ "'s type does not end in Type -> Type, and so cannot derive Traversable."
-                    
+TraversableVis vis g = do
+    let d = fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params
+        e = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
+        dtName = nameStr $ g.typeInfo.name
+    when e $ fail (piFail "Traversable" dtName)
+    unless (hasOneHoleShape' (g.typeInfo)) $ fail (oneHoleFail "Traversable" dtName)
+    pure $ MkInterfaceImpl "Traversable" vis [] (mkTraversableImpl g) (oneHoleImplementationType `(Traversable) [`{Foldable}] g)
+
 ||| Alias for `EqVis Public`.
 export
 Traversable : DeriveUtil -> Elab InterfaceImpl
@@ -534,10 +546,18 @@ getStuff n = do
   -- logMsg "usedArgs" 0 $ show usedArgs
   let g = genericUtil eff
   -- let b = doFunctor eff g
-  let r = oneHoleImplementationType `(Traversable) g
+  let r = oneHoleImplementationType `(Traversable) [`{Foldable}] g
+  logMsg "functorTypeR1" 0 $ show r
   let b = implementationType `(Eq) g
   let r = mkTraversableImpl g
-  logMsg "functorType" 0 $ show r
+  logMsg "functorTypeR2" 0 $ show r
+  logMsg "functorTypeT" 0 $ show g.appliedType
+  let b = hasOneHoleShape'' g.typeInfo
+  let d = fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params
+  logMsg "functorTypeB" 0 $ show b
+
+  let z = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
+  logMsg "functorTypeZ" 0 $ show z
 
   
   -- logMsg "functorType" 0 $ show eff.name
@@ -613,6 +633,11 @@ infoVoidFoo = getParamInfo "VoidFoo"
 -- %runElab derive `{Foo} [Functor]
 -- %runElab derive `{FooEnum} [Functor]
 
+%runElab getStuff `{F1}
+%runElab getStuff `{F4}
+
+
+
 data T a = T1 Int a | T2 (T a)
 data S a b = S1 (List b) | S2 (a, b, b)
 data H : Type -> Type -> Type where
@@ -641,6 +666,9 @@ infoH = getParamInfo "H"
 
 %runElab getStuff `{Tree1}
 
+-- %runElab derive' `{F1} [Foldable,Traversable] -- function type
+-- %runElab derive' `{F4} [Functor] -- contra
+-- %runElab derive' `{F1} [Functor] -- function type
 
 %runElab derive' `{FooA} [Functor]
 %runElab derive' `{FooA'} [Foldable]
@@ -648,24 +676,33 @@ infoH = getParamInfo "H"
 %runElab derive' `{FooA3} [Foldable]
 %runElab derive' `{FooAF} [Foldable]
 %runElab derive' `{F2} [Foldable]
-%runElab derive' `{Tree1} [Foldable,Traversable]
-%runElab derive' `{Tree2} [Foldable]
-%runElab derive' `{Tree3} [Foldable]
 
-Traversable Tree1 where
-  -- traverse f Leaf1 = [| Leaf1 |]
-  traverse f Leaf1 = pure Leaf1
-  -- traverse f (Branch1 x y z) = [| Branch1 (traverse f x) (f y) (traverse f z) |]
-  traverse f (Branch1 x y z) = pure Branch1 <*> traverse f x <*> f y <*> traverse f z
+-- This won't check if Foldable is missing until you use traverse
+%runElab derive' `{Tree1} [Functor,Foldable,Traversable]
+
+-- %runElab derive' `{Tree2} [Foldable]
+-- %runElab derive' `{Tree3} [Foldable]
+
+-- This should be an error but it's not! We've already derived this!
+-- It won't even error when you use map oddly enough.
+Functor FooA where
+  map f (MkFooA x) = MkFooA (f x)
+
+
+-- Traversable Tree1 where
+--   -- traverse f Leaf1 = [| Leaf1 |]
+--   traverse f Leaf1 = pure Leaf1
+--   -- traverse f (Branch1 x y z) = [| Branch1 (traverse f x) (f y) (traverse f z) |]
+--   traverse f (Branch1 x y z) = pure Branch1 <*> traverse f x <*> f y <*> traverse f z
 
 
 
 
-Traversable Tree2 where
-  traverse f x = ?dfsdf2
+-- Traversable Tree2 where
+--   traverse f x = ?dfsdf2
 
-Traversable Tree3 where
-  traverse f x = ?dfsdf3
+-- Traversable Tree3 where
+--   traverse f x = ?dfsdf3
 
 -- %runElab derive `{FooA2} [Functor]
 -- %runElab derive `{FooA3} [Functor]
