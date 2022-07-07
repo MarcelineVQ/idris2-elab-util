@@ -173,21 +173,12 @@ Functor f' => Functor (F3 a f') where
 Functor (F4 a) where
   map f (MkF4 g) = MkF4 $ \b => ?sdfds -- let r = contramap g?dsffsd ?sdfd b
 
-comap : Functor f => (a -> b) -> (f b -> f a)
-comap g x = ?comap_rhs
-
-
 
 --------------------------------------------------
 
-export
 shedOne : TTImp -> TTImp
 shedOne (IApp _ l r) = r
 shedOne tt = tt
-
-%macro
-spitError : String -> Elab a
-spitError = fail
 
 export
 ||| Does the datatype have the shape: data Foo : ... -> Type -> Type where ...
@@ -232,24 +223,26 @@ sameTag FunctionFV  FunctionFV  = True
 sameTag FunctionFCo FunctionFCo = True
 sameTag _           _           = False
 
-record FParamCon (n : Nat) where
+record FParamCon  where
   constructor MkFConField
   name : Name
-  args : Vect n (FieldTag, ExplicitArg)
+  args : List (FieldTag, ExplicitArg)
 
 public export
 record FParamTypeInfo where
   constructor MkFParamTypeInfo
+  -- {n : Nat}
   name   : Name
   params : Vect (S p) (Name,TTImp)
   appliedTy : TTImp -- fully applied type
   oneHoleType : TTImp -- applied type minus hole
   holeType :  (Name,TTImp) -- the hole param
-  cons : Vect n (m ** FParamCon m)
+  cons : Vect n FParamCon
   -- fieldtag tags the field, assists in making lhs = rhs and also for quick checking of the form. e.g., we can ask if there's any function types, and further if any of them are contra
 
 hasTag : FParamTypeInfo -> FieldTag -> Bool
-hasTag fp tag = or $ map (\(_ ** pc) => any (\(t,_) => sameTag tag t) pc.args) fp.cons
+hasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
+-- hasTag fp tag = or $ map (\pc => any (\(t,_) => sameTag tag t) pc.args) fp.cons
 
 -- farf : {g:_} -> (m ** FParamCon m) -> FParamCon g
 -- farf ((fst ** (MkFConField name args))) = let d = lengthCorrect args in ?farf_rhs_0
@@ -375,14 +368,55 @@ unTuple' tupName tt@(IApp _ (IApp _ (IVar _ nm) l) r) =
     (k ** imps) => if toBasicName nm == toBasicName tupName then (S k ** (l :: imps)) else (k ** imps)
 unTuple' tupName tt = (1 ** [tt])
 
+tagField : (holeType : Name) -> ExplicitArg -> FieldTag
+tagField t arg = case unTuple' "Pair" arg.tpe of
+  (S (S z) ** xs) => TupleF (S (S z))
+  _               => if isLeftParamOfPi (var t) arg.tpe
+                      then FunctionFCo
+                      else if isLastParamInPi (var t) arg.tpe
+                        then FunctionFV
+                        else case countLevels t arg.tpe of
+                          Nothing => RawF
+                          Just 1 => NameF
+                          Just n => AppF n
+
+-- makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
+-- makeFParamCon t (MkParamCon name explicitArgs) =
+--   let b = map (\r => (tagField t r, r)) explicitArgs
+--       r = length b
+--   in case toVect r b of
+--        Nothing => MkFConField name []
+--        Just xs => MkFConField name xs
+
+makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
+makeFParamCon t (MkParamCon name explicitArgs) =
+  MkFConField name $ map (\r => (tagField t r, r)) explicitArgs
+
+-- Failure implies its not a `Type -> Type` type
+makeFParamTypeInfo : DeriveUtil -> Maybe FParamTypeInfo
+makeFParamTypeInfo g = do
+    let ps = g.typeInfo.params
+        r = length ps -- bound here to be available for matching ps' right after
+        ps' = toVect r ps
+    Just xs@(_ :: _)      <- pure ps'       | err => Nothing
+    holeType@(_, IType _) <- pure $ last xs | err => Nothing
+    let (h,_) = splitLastVar g.appliedType
+    let z = map (makeFParamCon (fst holeType)) g.typeInfo.cons
+    pure $ MkFParamTypeInfo g.typeInfo.name xs g.appliedType h holeType (fromList z)
+  where
+    splitLastVar : TTImp -> (TTImp,TTImp)
+    splitLastVar (IApp _ y l) = (y,l)
+    splitLastVar tt = (tt,tt) -- we've already rejected types without proper params so this should be safe
+
+
 export
-genMapTT : DeriveUtil -> (funImpl : Name) -> (target : Name) -> TTImp
-genMapTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
-                     then `(believe_me)
-                     else lambdaArg "x" .=> iCase (var "x") implicitFalse
-                          (if length g.typeInfo.cons == 0
-                              then [impossibleClause `(_)]
-                              else clauses)
+genMapTT : DeriveUtil -> FParamTypeInfo -> (funImpl : Name) -> (target : Name) -> TTImp
+genMapTT g fp fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
+                       then `(believe_me)
+                       else lambdaArg "x" .=> iCase (var "x") implicitFalse
+                             (if length g.typeInfo.cons == 0
+                                 then [impossibleClause `(_)]
+                                 else clauses)
   where
     doRule : ExplicitArg -> TTImp
     doRule (MkExplicitArg name tpe paramTypes isRecursive _) = fromMaybe (toBasicName' name) $ ru tpe
@@ -412,6 +446,9 @@ genMapTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
         ru p@(IPi _ rig pinfo mnm argTy retTy) = contraRu t (var fn) (unPi p)
         -- General case, cover IVars and IApps
         ru tt = run name tt
+    
+    lhs : FParamCon -> TTImp
+    lhs fpc = ?sdfSDffd
 
 
     lhss : List ParamCon -> List TTImp
@@ -424,44 +461,7 @@ genMapTT g fn t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
     clauses = zipWith (.=) (lhss g.typeInfo.cons) (rhss g.typeInfo.cons)
 
 mkFunctorImpl : DeriveUtil -> FParamTypeInfo -> TTImp
-mkFunctorImpl g fp = `(MkFunctor) .$ (lambdaArg "f" .=> (genMapTT g "f" (fst fp.holeType)))
-
-tagField : (holeType : Name) -> ExplicitArg -> FieldTag
-tagField t arg = case unTuple' "Pair" arg.tpe of
-  (S z ** (_::_)) => TupleF (S z)
-  _               => if isLeftParamOfPi (var t) arg.tpe
-                      then FunctionFCo
-                      else if isLastParamInPi (var t) arg.tpe
-                        then FunctionFV
-                        else case countLevels t arg.tpe of
-                          Nothing => RawF
-                          Just 1 => NameF
-                          Just n => AppF n
-
-makeFParamCon : (holeType : Name) -> ParamCon -> (m ** FParamCon m)
-makeFParamCon t (MkParamCon name explicitArgs) =
-  let b = map (\r => (tagField t r, r)) explicitArgs
-      r = length b
-  in case toVect r b of
-       Nothing => (Z ** MkFConField name [])
-       Just xs => (r ** MkFConField name xs)
-
--- Failure implies its not a `Type -> Type` type
-makeFParamTypeInfo : DeriveUtil -> Maybe FParamTypeInfo
-makeFParamTypeInfo g = do
-    let ps = g.typeInfo.params
-        r = length ps -- bound here to be available for matching ps' right after
-        ps' = toVect r ps
-    Just xs@(_ :: _)      <- pure ps'       | err => Nothing
-    holeType@(_, IType _) <- pure $ last xs | err => Nothing
-    let (h,_) = splitLastVar g.appliedType
-    let z = map (makeFParamCon (fst holeType)) g.typeInfo.cons
-    pure $ MkFParamTypeInfo g.typeInfo.name xs g.appliedType h holeType (fromList z)
-  where
-    -- we've already rejected typed without proper params so this should besafe
-    splitLastVar : TTImp -> (TTImp,TTImp)
-    splitLastVar (IApp _ y l) = (y,l)
-    splitLastVar tt = (tt,tt)
+mkFunctorImpl g fp = `(MkFunctor) .$ (lambdaArg "f" .=> (genMapTT g fp "f" (fst fp.holeType)))
 
 -- This should reject types where the last arg is used contravariantly anywhere
 ||| Derives a `Functor` implementation for the given data type
@@ -671,8 +671,39 @@ infoF3 : TypeInfo
 infoF3 = getInfo "F3"
 
 export
-infoF4 : TypeInfo
-infoF4 = getInfo "F4"
+infoF4 : ParamTypeInfo
+infoF4 = getParamInfo "F4"
+
+export
+infoF4F : FParamTypeInfo
+infoF4F = case makeFParamTypeInfo (genericUtil infoF4) of
+            Just x => x
+            Nothing => believe_me 0
+
+data FooTup a = MkFooTup (Int,a,Char)
+
+data FooTup2 a b = MkFooTup2 (Int,a,b,Char)
+
+export
+infoFooTup : ParamTypeInfo
+infoFooTup = getParamInfo "FooTup"
+
+export
+infoFooTup2 : ParamTypeInfo
+infoFooTup2 = getParamInfo "FooTup2"
+
+
+export
+infoFooTup2F : FParamTypeInfo
+infoFooTup2F = case makeFParamTypeInfo (genericUtil infoFooTup2) of
+            Just x => x
+            Nothing => believe_me 0
+
+export
+infoFooTupF : FParamTypeInfo
+infoFooTupF = case makeFParamTypeInfo (genericUtil infoFooTup) of
+            Just x => x
+            Nothing => believe_me 0
 
 export
 infoF5 : TypeInfo
@@ -714,17 +745,6 @@ export
 infoVoidFoo : ParamTypeInfo
 infoVoidFoo = getParamInfo "VoidFoo"
 
-data FooTup a = MkFooTup (Int,a,Char)
-
-data FooTup2 a b = MkFooTup2 (Int,a,b,Char)
-
-export
-infoFooTup : ParamTypeInfo
-infoFooTup = getParamInfo "FooTup"
-
-export
-infoFooTup2 : ParamTypeInfo
-infoFooTup2 = getParamInfo "FooTup2"
 
 -- %runElab getStuff `{F2}
 -- %runElab getStuff `{F3}
@@ -772,13 +792,14 @@ infoH = getParamInfo "H"
 
 %runElab getStuff `{Tree1}
 
+
+data FooAZ : Type -> Type -> (Type -> Type) -> Type where
+  MkFooAZ : a -> FooAZ a b f
+
 -- %runElab derive' `{F1} [Foldable,Traversable] -- function type
 -- %runElab derive' `{F4} [Functor] -- contra
 -- %runElab derive' `{F1} [Functor] -- function type
-
--- data FooAZ : Type -> Type -> (Type -> Type) -> Type where
-  -- MkFooAZ : a -> FooAZ a b f
--- %runElab derive' `{FooAZ} [Functor]
+-- %runElab derive' `{FooAZ} [Functor] -- not (Type -> Type)
 
 %runElab derive' `{FooA} [Functor]
 -- %runElab derive' `{FooA'} [Foldable]
@@ -814,27 +835,3 @@ Functor FooA where
 -- Traversable Tree3 where
 --   traverse f x = ?dfsdf3
 
--- %runElab derive `{FooA2} [Functor]
--- %runElab derive `{FooA3} [Functor]
--- %runElab derive `{FooA4} [Functor]
--- -- %runElab derive `{FooAF} [Functor] -- ?s
--- %runElab derive `{FooAK} [Functor,Foldable]
--- %runElab derive `{FooAK2} [Functor]
--- %runElab derive `{FooAKG2} [Functor]
--- %runElab derive `{FooAKR2} [Functor]
--- %runElab derive `{VoidFoo} [Functor,Foldable]
--- %runElab derive `{Foo2} [Functor]
--- %runElab derive `{Tree1} [Functor]
--- %runElab derive `{Tree2} [Functor]
--- %runElab derive `{Tree3} [Functor]
--- %runElab derive `{F1} [Functor]
--- %runElab derive `{F2} [Functor]
--- %runElab derive `{F3} [Functor]
--- %runElab derive `{F2'} [Functor] -- indices should actually be ok
--- %runElab derive `{F2''} [Functor] -- nested a -> b
--- %runElab derive `{F4} [Functor]
--- %runElab derive `{F5} [Functor]
--- %runElab derive `{Casetag} [Functor]
--- %runElab derive `{Foo} [Functor]
--- %runElab derive `{Foo} [Functor]
--- %runElab derive `{Foo} [Functor]
