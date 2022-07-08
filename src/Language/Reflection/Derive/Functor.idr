@@ -201,7 +201,7 @@ tagField t arg = case unTuple' "Pair" arg.tpe of
                         then FunctionFV
                         else case countLevels t arg.tpe of
                           Nothing => SkipF
-                          Just 1 => TargetF
+                          Just Z => TargetF
                           Just n => AppF n
 
 -- makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
@@ -234,7 +234,7 @@ makeFParamTypeInfo g = do
 
 data Raf : Type -> Type -> Type where
   -- MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> a -> b) -> Raf a b
-  MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> b) -> (Int -> Bool -> Char) -> Raf a b
+  MkRaf : a -> b -> Maybe b -> (a -> b) -> (Int -> Bool -> Char) -> Raf a b
 
 -- export
 -- Show a => Show b => Show (Raf a b) where
@@ -255,49 +255,55 @@ genMapTT g fp t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
                              then [impossibleClause `(_)]
                              else clauses)
   where
-    doRule : ExplicitArg -> TTImp
-    doRule (MkExplicitArg name tpe paramTypes isRecursive _) = fromMaybe (toBasicName' name) $ ru tpe
-      where
-        run : Name -> TTImp -> Maybe TTImp
-        run n a = [| (appLevels "f" `(map) <$> countLevels t a) .$ Just (toBasicName' n) |]
+    run : Name -> TTImp -> Maybe TTImp
+    run n a = [| (appLevels "f" `(map) <$> countLevels t a) .$ Just (toBasicName' n) |]
 
-        mutual -- doPi is fine, the problem is that we're not acting on tags
-          doPi : TTImp -> TTImp
-          doPi tt = case unPi tt of
-                      (x, y) => let names = map (fromString . ("p_" ++) . show) [1 .. length x]
-                                    args = zip names x
-                                in  foldr (\(n,arg),tt => lambdaArg n .=> tt) (var "f" .$ appNames (toBasicName name) names) args
+    doPi : Name -> TTImp -> TTImp
+    doPi name tt = case unPi tt of
+                (x, y) => let names = map (fromString . ("p_" ++) . show) [1 .. length x]
+                              args = zip names x
+                          in  foldr (\(n,arg),tt => lambdaArg n .=> tt) (var "f" .$ appNames (toBasicName name) names) args
 
-          ru : TTImp -> Maybe TTImp
-          -- Special tuple case
-          -- Tuple cases are basically bundles of fields
-          -- ru a@(IApp _ _ _) = case unTuple' "Pair" a of
-          --     (Z **_)   => run name a
-          --     (k@(S _) ** xs@(_ :: _)) =>
-          --       let mxs = map ru xs -- I need to: case tup of (x,y,z) => (ru x, ru y, ru z)
-          --           tnames = map (("t_" ++) . show) [0 .. k]
-          --           -- nmxs = zorp tnames mxs
-          --           -- tlhs = foldr1 (\x,acc => pure `(MkPair ~(!(run !(x))) ~(!acc))) mxs
-          --           tlhs = ?dfdsdew
-          --           trhs = foldr (\x,acc => let r = x >>= run ?n in pure $ `(MkPair) .$ !r .$ !acc) ?m mxs
-          --       in Just $ iCase (toBasicName' name) implicitFalse ?sdffd
-          -- Special function case
-          ru p@(IPi _ rig pinfo mnm argTy retTy) = Just (doPi p) -- pure $ `(\x => ~(!(ru retTy)))
-          -- General case, cover IVars and IApps
-          ru tt = run name tt
+    doRule : (FieldTag, ExplicitArg) -> TTImp
+    -- doRule (tag, MkExplicitArg name tpe paramTypes isRecursive _) = ?dsfefsedsf --fromMaybe (toBasicName' name) $ ru tpe
+    doRule (SkipF, MkExplicitArg name tpe _ _ _) = toBasicName' name
+    doRule (TargetF, MkExplicitArg name tpe _ _ _) = appLevels "f" `(map) Z .$ (toBasicName' name)
+    doRule ((AppF k), MkExplicitArg name tpe _ _ _) = appLevels "f" `(map) k .$ (toBasicName' name)
+    doRule ((TupleF k), MkExplicitArg name tpe _ _ _) = toBasicName' name -- NO
+    doRule (FunctionFV, MkExplicitArg name tpe _ _ _) = doPi name tpe
+    doRule (FunctionFCo, MkExplicitArg name tpe _ _ _) = `(_) -- Will not occur.
+
+      -- where
+      --   ru : TTImp -> Maybe TTImp
+      --   -- Special tuple case
+      --   -- Tuple cases are basically bundles of fields
+      --   -- ru a@(IApp _ _ _) = case unTuple' "Pair" a of
+      --   --     (Z **_)   => run name a
+      --   --     (k@(S _) ** xs@(_ :: _)) =>
+      --   --       let mxs = map ru xs -- I need to: case tup of (x,y,z) => (ru x, ru y, ru z)
+      --   --           tnames = map (("t_" ++) . show) [0 .. k]
+      --   --           -- nmxs = zorp tnames mxs
+      --   --           -- tlhs = foldr1 (\x,acc => pure `(MkPair ~(!(run !(x))) ~(!acc))) mxs
+      --   --           tlhs = ?dfdsdew
+      --   --           trhs = foldr (\x,acc => let r = x >>= run ?n in pure $ `(MkPair) .$ !r .$ !acc) ?m mxs
+      --   --       in Just $ iCase (toBasicName' name) implicitFalse ?sdffd
+      --   -- Special function case
+      --   -- ru p@(IPi _ rig pinfo mnm argTy retTy) = Just (doPi p) -- pure $ `(\x => ~(!(ru retTy)))
+      --   -- General case, cover IVars and IApps
+      --   ru tt = run name tt
     
     lhs : FParamCon -> TTImp
     lhs fpc = ?sdfSDffd
 
 
-    lhss : List ParamCon -> List TTImp
-    lhss = map (\pc => appNames pc.name (map (toBasicName . name) pc.explicitArgs))
+    lhss : Vect conCount FParamCon -> Vect conCount TTImp
+    lhss = map (\pc => appNames pc.name (map (toBasicName . name . snd) pc.args))
 
-    rhss : List ParamCon -> List TTImp
-    rhss = map (\pc => appAll pc.name (map doRule pc.explicitArgs))
+    rhss : Vect conCount FParamCon -> Vect conCount TTImp
+    rhss = map (\pc => appAll pc.name (map doRule pc.args))
 
     clauses : List Clause
-    clauses = zipWith (.=) (lhss g.typeInfo.cons) (rhss g.typeInfo.cons)
+    clauses = toList $ zipWith (.=) (lhss fp.cons) (rhss fp.cons)
 
 mkFunctorImpl : DeriveUtil -> FParamTypeInfo -> TTImp
 mkFunctorImpl g fp = `(MkFunctor $ \f => ~(genMapTT g fp (fst fp.holeType)))
@@ -797,7 +803,7 @@ data FooAZ : Type -> Type -> (Type -> Type) -> Type where
 -- %runElab derive' `{F4} [Functor] -- contra
 -- %runElab derive' `{FooAZ} [Functor] -- not (Type -> Type)
 
-%runElab derive' `{FooA} [Functor,Foldable,Traversable]
+-- %runElab derive' `{FooA} [Functor,Foldable,Traversable]
 -- %runElab derive' `{FooA'} [Foldable]
 -- %runElab derive' `{FooA2} [Foldable]
 -- %runElab derive' `{FooA3} [Foldable]
