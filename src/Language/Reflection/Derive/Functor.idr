@@ -24,31 +24,6 @@ import Language.Reflection.Derive
 
 --------------------------------------------------
 
-shedOne : TTImp -> TTImp
-shedOne (IApp _ l r) = r
-shedOne tt = tt
-
-export
-||| Does the datatype have the shape: data Foo : ... -> Type -> Type where ...
-hasOneHoleShape : Data -> Bool
-hasOneHoleShape = \case (MkData _ _ tycon _ datacons) => examineTyCon tycon
-                        (MkLater _ _ tycon) => examineTyCon tycon
-  where
-    examineTyCon : (tycon : TTImp) -> Bool
-    examineTyCon (IPi _ _ _ _ (IType _) (IType _)) = True
-    examineTyCon (IPi _ _ _ _ _ retTy) = examineTyCon retTy
-    examineTyCon _ = False
-
--- hasOneHoleShape' : ParamTypeInfo -> Bool
--- hasOneHoleShape' pt = case last' (params pt) of
---                    Just (_, IType _) => True; _ => False
-
-hasOneHoleShape'' : ParamTypeInfo -> Maybe (Name,TTImp)
-hasOneHoleShape'' pt = last' (params pt) >>= \x => case x of (_, IType _) => Just x; _ => Nothing
-
-hasOneHoleShape' : ParamTypeInfo -> Bool
-hasOneHoleShape' = isJust . hasOneHoleShape''
-
 init' : List a -> List a
 init' (x :: xs@(_ :: _)) = x :: init xs
 init' [x] = []
@@ -90,7 +65,6 @@ record FParamTypeInfo where
 
 hasTag : FParamTypeInfo -> FieldTag -> Bool
 hasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
--- hasTag fp tag = or $ map (\pc => any (\(t,_) => sameTag tag t) pc.args) fp.cons
 
 
 export
@@ -146,30 +120,21 @@ isPhantomArg arg g = let b = filter (not . isRecursive) . concatMap explicitArgs
                          c' = filter (\case IVar _ na => na == arg; _ => False) c
                    in not $ length c' > 0
 
-export
-specialCases : (target : Name) -> DeriveUtil -> List Clause -> List Clause
-specialCases t g cs = if length (g.typeInfo.cons) == 0
-                         then [impossibleClause `(_)]
-                         else if isPhantomArg t g
-                                 then [`(_) .= `(believe_me)]
-                                 else cs
-
-
-export
-isTuple : TTImp -> Bool
-isTuple (IApp _ s u) = isTuple s
-isTuple (IVar _ nm) = if toBasicName nm == "Pair" then True else False
-isTuple _ = False
-
+||| Is our target type used in a pi type
 isLastParamInPi : (target : TTImp) -> (body : TTImp) -> Bool
 isLastParamInPi t (IPi fc rig pinfo mnm argTy retTy) = t == argTy || t == retTy || isLastParamInPi t retTy
 isLastParamInPi t (IApp fc s u) = isLastParamInPi t s || isLastParamInPi t u
 isLastParamInPi t tt = False
 
+||| Is our target type used contravariantly in a pi type
 isLeftParamOfPi : (target : TTImp) -> (body : TTImp) -> Bool
 isLeftParamOfPi t (IPi fc rig pinfo mnm argTy retTy) = t == argTy || isLeftParamOfPi t retTy
 isLeftParamOfPi t (IApp fc s u) = isLeftParamOfPi t s || isLeftParamOfPi t u
 isLeftParamOfPi t tt = False
+
+------------------------------------------------------------
+-- Failure reporting
+------------------------------------------------------------
 
 failDerive : (where' : String) -> (why : String) -> String
 failDerive where' why = "Failure deriving \{where'}: \{why}"
@@ -183,6 +148,8 @@ contraFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as it
 oneHoleFail : (impl : String) -> (dtName : String) -> String
 oneHoleFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its type does not end in Type -> Type."
 
+------------------------------------------------------------
+
 -- Doesn't really need to be Vect given how we use it so far
 export
 unTuple' : (tupName : Name) -> TTImp -> (n ** Vect n TTImp)
@@ -191,7 +158,13 @@ unTuple' tupName tt@(IApp _ (IApp _ (IVar _ nm) l) r) =
     (k ** imps) => if toBasicName nm == toBasicName tupName then (S k ** (l :: imps)) else (k ** imps)
 unTuple' tupName tt = (1 ** [tt])
 
--- TODO this needs to count pi's that don't contain our type as SkipF
+export
+unTuple'' : (tupName : Name) -> TTImp -> List TTImp
+unTuple'' tupName tt@(IApp _ (IApp _ (IVar _ nm) l) r) =
+  case unTuple'' tupName r of
+    imps => if toBasicName nm == toBasicName tupName then (l :: imps) else imps
+unTuple'' tupName tt = [tt]
+
 tagField : (holeType : Name) -> ExplicitArg -> FieldTag
 tagField t arg = case unTuple' "Pair" arg.tpe of
   (S (S z) ** xs) => TupleF (S (S z))
@@ -204,17 +177,21 @@ tagField t arg = case unTuple' "Pair" arg.tpe of
                           Just Z => TargetF
                           Just n => AppF n
 
--- makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
--- makeFParamCon t (MkParamCon name explicitArgs) =
---   let b = map (\r => (tagField t r, r)) explicitArgs
---       r = length b
---   in case toVect r b of
---        Nothing => MkFConField name []
---        Just xs => MkFConField name xs
+tagField' : (holeType : Name) -> (arg : TTImp) -> FieldTag
+tagField' t arg = case unTuple' "Pair" arg of
+  (S (S z) ** xs) => TupleF (S (S z))
+  _               => if isLeftParamOfPi (var t) arg
+                      then FunctionFCo
+                      else if isLastParamInPi (var t) arg
+                        then FunctionFV
+                        else case countLevels t arg of
+                          Nothing => SkipF
+                          Just Z => TargetF
+                          Just n => AppF n
 
 makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
 makeFParamCon t (MkParamCon name explicitArgs) =
-  MkFConField name $ map (\r => (tagField t r, r)) explicitArgs
+  MkFConField name $ map (\r => (tagField' t r.tpe, r)) explicitArgs
 
 -- Failure implies its not a `Type -> Type` type
 makeFParamTypeInfo : DeriveUtil -> Maybe FParamTypeInfo
@@ -234,7 +211,9 @@ makeFParamTypeInfo g = do
 
 data Raf : Type -> Type -> Type where
   -- MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> a -> b) -> Raf a b
-  MkRaf : a -> b -> Maybe b -> (a -> b) -> (Int -> Bool -> Char) -> Raf a b
+  -- MkRaf : (a,b) -> Raf a b
+  -- MkRaf : a -> b -> Maybe b -> (a,b) -> Raf a b
+  MkRaf : a -> b -> Maybe b -> (a -> b) -> (a,b,a,Char) -> (Int -> Bool -> Char) -> Raf a b
 
 -- export
 -- Show a => Show b => Show (Raf a b) where
@@ -246,61 +225,61 @@ Functor Forf where
   map f (MkForf g) = MkForf $ \x => ?dsfsdf_0 -- contra
 
 
+appNE : (xs : List a) -> (l : a) -> NonEmpty (xs ++ [l])
+appNE [] l = IsNonEmpty
+appNE (x :: xs) l = IsNonEmpty
+
+
 export
 genMapTT : DeriveUtil -> FParamTypeInfo -> (target : Name) -> TTImp
 genMapTT g fp t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
                     then `(believe_me)
-                    else lambdaArg "x" .=> iCase (var "x") implicitFalse
+                    else lambdaArg "z" .=> iCase (var "z") implicitFalse
                           (if length g.typeInfo.cons == 0
                              then [impossibleClause `(_)]
                              else clauses)
   where
-    run : Name -> TTImp -> Maybe TTImp
-    run n a = [| (appLevels "f" `(map) <$> countLevels t a) .$ Just (toBasicName' n) |]
+    run : Name -> TTImp -> TTImp
+    run n a = fromMaybe (toBasicName' n) (appLevels "f" `(map) <$> countLevels t a)
 
-    doPi : Name -> TTImp -> TTImp
+    doPi : TTImp -> TTImp -> TTImp
     doPi name tt = case unPi tt of
                 (x, y) => let names = map (fromString . ("p_" ++) . show) [1 .. length x]
                               args = zip names x
-                          in  foldr (\(n,arg),tt => lambdaArg n .=> tt) (var "f" .$ appNames (toBasicName name) names) args
+                          in  foldr (\(n,arg),tt => lambdaArg n .=> tt) (var "f" .$ foldl (.$) name (map var names)) args
 
-    doRule : (FieldTag, ExplicitArg) -> TTImp
-    -- doRule (tag, MkExplicitArg name tpe paramTypes isRecursive _) = ?dsfefsedsf --fromMaybe (toBasicName' name) $ ru tpe
-    doRule (SkipF, MkExplicitArg name tpe _ _ _) = toBasicName' name
-    doRule (TargetF, MkExplicitArg name tpe _ _ _) = appLevels "f" `(map) Z .$ (toBasicName' name)
-    doRule ((AppF k), MkExplicitArg name tpe _ _ _) = appLevels "f" `(map) k .$ (toBasicName' name)
-    doRule ((TupleF k), MkExplicitArg name tpe _ _ _) = toBasicName' name -- NO
-    doRule (FunctionFV, MkExplicitArg name tpe _ _ _) = doPi name tpe
-    doRule (FunctionFCo, MkExplicitArg name tpe _ _ _) = `(_) -- Will not occur.
+    mutual
+      -- split, make new tags for each, doRules on each, recombine
+      -- should actually check in doRule if the tuple uses our target type in the first place
+      doTuple : TTImp -> TTImp -> TTImp
+      doTuple name tt' =
+        case unTuple'' "Pair" tt' of -- repeated work, bundle this in the tag?
+          [] => `(?asdSDfd) -- won't happen
+          ts@(_::_) => 
+            let count = length ts
+                names = map (fromString . ("t_" ++) . show) [1 .. count]
+                namedTT = zip (map var names) ts
+                tagged = zip (map (tagField' (fst fp.holeType)) ts) namedTT
+            in case splitAt (count `minus` 1) tagged of
+                  (xs,[(ltag,ln,lt)]) =>
+                    let tupL = foldr (\n,ns => `(MkPair ~(n) ~ns) ) ln (map (fst . snd) xs)
+                        tupR = foldr (\(tag,n,t),tt => `(MkPair) .$ (doRule (tag,n,t)) .$ tt) (doRule (ltag,ln,lt)) xs
+                    in  iCase name `(_) [tupL .= tupR]
+                  _ => `(?dsdffd) -- won't happen
 
-      -- where
-      --   ru : TTImp -> Maybe TTImp
-      --   -- Special tuple case
-      --   -- Tuple cases are basically bundles of fields
-      --   -- ru a@(IApp _ _ _) = case unTuple' "Pair" a of
-      --   --     (Z **_)   => run name a
-      --   --     (k@(S _) ** xs@(_ :: _)) =>
-      --   --       let mxs = map ru xs -- I need to: case tup of (x,y,z) => (ru x, ru y, ru z)
-      --   --           tnames = map (("t_" ++) . show) [0 .. k]
-      --   --           -- nmxs = zorp tnames mxs
-      --   --           -- tlhs = foldr1 (\x,acc => pure `(MkPair ~(!(run !(x))) ~(!acc))) mxs
-      --   --           tlhs = ?dfdsdew
-      --   --           trhs = foldr (\x,acc => let r = x >>= run ?n in pure $ `(MkPair) .$ !r .$ !acc) ?m mxs
-      --   --       in Just $ iCase (toBasicName' name) implicitFalse ?sdffd
-      --   -- Special function case
-      --   -- ru p@(IPi _ rig pinfo mnm argTy retTy) = Just (doPi p) -- pure $ `(\x => ~(!(ru retTy)))
-      --   -- General case, cover IVars and IApps
-      --   ru tt = run name tt
-    
-    lhs : FParamCon -> TTImp
-    lhs fpc = ?sdfSDffd
+      doRule : (FieldTag, TTImp, TTImp) -> TTImp
+      doRule (SkipF, name, tpe) = name
+      doRule (TargetF, name, tpe) = appLevels "f" `(map) Z .$ name
+      doRule ((AppF k), name, tpe) = appLevels "f" `(map) k .$ name
+      doRule ((TupleF k), name, tpe) = doTuple name tpe
+      doRule (FunctionFV, name, tpe) = doPi name tpe
+      doRule (FunctionFCo, name, tpe) = name -- Will not occur.
 
-
-    lhss : Vect conCount FParamCon -> Vect conCount TTImp
+    lhss : Vect cc FParamCon -> Vect cc TTImp
     lhss = map (\pc => appNames pc.name (map (toBasicName . name . snd) pc.args))
 
-    rhss : Vect conCount FParamCon -> Vect conCount TTImp
-    rhss = map (\pc => appAll pc.name (map doRule pc.args))
+    rhss : Vect cc FParamCon -> Vect cc TTImp
+    rhss = map (\pc => appAll pc.name (map (\(tag, arg) => doRule (tag, toBasicName' arg.name, arg.tpe)) pc.args))
 
     clauses : List Clause
     clauses = toList $ zipWith (.=) (lhss fp.cons) (rhss fp.cons)
@@ -319,7 +298,9 @@ FunctorVis vis g = do
     Just fp <- pure $ makeFParamTypeInfo g
       | _ => fail (oneHoleFail iname dtName)
     when (hasTag fp FunctionFCo) $ fail (contraFail iname dtName) -- reject contravariant uses of the hole type
-    pure $ MkInterfaceImpl "Functor" vis [] (mkFunctorImpl g fp) (oneHoleImplementationType `(Functor) [] g)
+    pure $ MkInterfaceImpl iname vis []
+             (mkFunctorImpl g fp)
+             (oneHoleImplementationType `(Functor) [] g)
 
 ||| Alias for `FunctorVis Public`.
 export
@@ -416,7 +397,6 @@ genTraverseTT g t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
     doRule (MkExplicitArg name tpe paramTypes isRecursive _) = fromMaybe (toBasicName' name) $
       [| (appLevels "f" `(traverse) <$> countLevels t tpe) .$ Just (toBasicName' name) |]
 
-
     lhss : List ParamCon -> List TTImp
     lhss = map (\pc => appNames pc.name (map (toBasicName . name) pc.explicitArgs))
 
@@ -463,22 +443,22 @@ getStuff n = do
   -- logMsg "" 0 (show $ tyinfo.name)
   -- the pprinter does an assload of nat figuring that shits up the compile time
   -- logMsg "freaf" 0 $ renderString . layoutPretty defaultLayoutOptions $ (indent 2 $ vsep ["", pretty {ann = ()} eff, "",""])
-  let usedArgs = calcArgTypesWithParams eff
-  -- logMsg "usedArgs" 0 $ show usedArgs
+  -- let usedArgs = calcArgTypesWithParams eff
+  -- -- logMsg "usedArgs" 0 $ show usedArgs
   let g = genericUtil eff
-  -- let b = doFunctor eff g
-  let r = oneHoleImplementationType `(Traversable) [`{Foldable}] g
-  logMsg "functorTypeR1" 0 $ show r
-  let b = implementationType `(Eq) g
+  -- -- let b = doFunctor eff g
+  -- let r = oneHoleImplementationType `(Traversable) [`{Foldable}] g
+  -- logMsg "functorTypeR1" 0 $ show r
+  -- let b = implementationType `(Eq) g
   let r = mkTraversableImpl g
-  logMsg "functorTypeR2" 0 $ show r
-  logMsg "functorTypeT" 0 $ show g.appliedType
-  let b = hasOneHoleShape'' g.typeInfo
-  let d = fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params
-  logMsg "functorTypeB" 0 $ show b
+  -- logMsg "functorTypeR2" 0 $ show r
+  -- logMsg "functorTypeT" 0 $ show g.appliedType
+  -- let b = hasOneHoleShape'' g.typeInfo
+  -- let d = fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params
+  -- logMsg "functorTypeB" 0 $ show b
 
-  let z = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
-  logMsg "functorTypeZ" 0 $ show z
+  -- let z = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
+  -- logMsg "functorTypeZ" 0 $ show z
 
   
   -- logMsg "functorType" 0 $ show eff.name
@@ -707,6 +687,20 @@ infoRafF = case makeFParamTypeInfo (genericUtil infoRaf) of
 
 %runElab derive' `{Raf} [Functor]
 
+-- Functor (Raf a) where
+  -- map f (MkRaf x) = MkRaf (case x of (t_1,t_2) => (t_1,f t_2))
+
+borb : map {f=Raf Char} S (MkRaf 'a' Z (Just Z) (const Z) ('a',Z,'a','c') (\_,_ => 'f')) = (MkRaf 'a' (S Z) (Just (S Z)) (const (S Z)) ('a',S Z,'a','c') (\_,_ => 'f'))
+borb = Refl
+
+mapId : Functor f => (xs : f a) -> map Prelude.id xs = xs
+mapId xs = let r = map id xs in ?sdffsd
+
+idYes : (x : a) -> id x = x
+idYes x = Refl
+
+borb' : let t = (MkRaf 'a' Z (Just Z) (const Z) ('a',Z,'a','c') (\_,_ => 'f')) in map Prelude.id t = t
+borb' = Refl
 
 export
 infoF5 : TypeInfo
@@ -753,17 +747,17 @@ infoVoidFoo = getParamInfo "VoidFoo"
 -- %runElab getStuff `{F3}
 -- %runElab getStuff `{F4}
 -- %runElab getStuff `{F5}
-%runElab getStuff `{FooAK}
-%runElab getStuff `{FooAK2}
-%runElab getStuff `{VoidFoo}
+-- %runElab getStuff `{FooAK}
+-- %runElab getStuff `{FooAK2}
+-- %runElab getStuff `{VoidFoo}
 -- %runElab derive `{Foo2} [Functor]
 -- %runElab derive `{FooAK} [Functor]
 
 -- %runElab derive `{Foo} [Functor]
 -- %runElab derive `{FooEnum} [Functor]
 
-%runElab getStuff `{F1}
-%runElab getStuff `{F4}
+-- %runElab getStuff `{F1}
+-- %runElab getStuff `{F4}
 
 
 
@@ -793,7 +787,7 @@ infoH = getParamInfo "H"
 --   fmap f (S1 bs)    = S1 (fmap f bs)
 --   fmap f (S2 (p,q)) = S2 (a, fmap f q)
 
-%runElab getStuff `{Tree1}
+-- %runElab getStuff `{Tree1}
 
 
 data FooAZ : Type -> Type -> (Type -> Type) -> Type where
