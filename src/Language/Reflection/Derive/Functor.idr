@@ -1,33 +1,15 @@
 module Language.Reflection.Derive.Functor
 
 import public Language.Reflection.Pretty
-import public Language.Reflection.Syntax
-import public Language.Reflection.Types
+-- import public Language.Reflection.Syntax
+-- import public Language.Reflection.Types
 
-import System
-
-import Language.Reflection
-import Language.Reflection.Syntax
-
-import Prelude.Interfaces -- MkFunctor
-
-import Data.String
-import Text.PrettyPrint.Prettyprinter.Doc
-import Text.PrettyPrint.Prettyprinter.Render.String
-
-import Data.Stream
-
-import Data.Contravariant
+-- import Language.Reflection
 
 import Language.Reflection.Derive
 %language ElabReflection
 
 --------------------------------------------------
-
-init' : List a -> List a
-init' (x :: xs@(_ :: _)) = x :: init xs
-init' [x] = []
-init' [] = []
 
 data FieldTag
   = SkipF -- field to be left alone, either being placed back in as-is (map) or skipped (foldMap)
@@ -50,21 +32,20 @@ record FParamCon  where
   constructor MkFConField
   name : Name
   args : List (FieldTag, ExplicitArg)
+  -- fieldtag assists in making lhs = rhs and also for quick checking of the form. e.g., we can ask if there's any function types, and further if any of them are contra
 
 public export
 record FParamTypeInfo where
   constructor MkFParamTypeInfo
-  -- {n : Nat}
   name   : Name
   params : Vect (S paramCountMinusOne) (Name,TTImp)
   appliedTy : TTImp -- fully applied type
   oneHoleType : TTImp -- applied type minus hole
   holeType :  (Name,TTImp) -- the hole param
   cons : Vect conCount FParamCon
-  -- fieldtag tags the field, assists in making lhs = rhs and also for quick checking of the form. e.g., we can ask if there's any function types, and further if any of them are contra
 
-hasTag : FParamTypeInfo -> FieldTag -> Bool
-hasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
+fpHasTag : FParamTypeInfo -> FieldTag -> Bool
+fpHasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
 
 
 export
@@ -76,18 +57,18 @@ argTypesWithParamsAndApps l ss = mapMaybe slice ss
     slice (IApp fc s u) = if u == l then Just s else Nothing
     slice _ = Nothing
 
-export
-oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> DeriveUtil -> TTImp
-oneHoleImplementationType iface reqs (MkDeriveUtil _ appTp names argTypesWithParams) =
-    let (vars,l) = dropLastVar appTp
-        appIface = iface .$ vars
-        functorVars = argTypesWithParamsAndApps l argTypesWithParams
-        autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) vars) reqs
-     in piAllImplicit autoArgs (init' names)
-  where
-    dropLastVar : TTImp -> (TTImp,TTImp)
-    dropLastVar (IApp _ y l) = (y,l)
-    dropLastVar tt = (tt,tt)
+-- export
+-- oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> DeriveUtil -> TTImp
+-- oneHoleImplementationType iface reqs (MkDeriveUtil _ appTp names argTypesWithParams) =
+--     let (vars,l) = dropLastVar appTp
+--         appIface = iface .$ vars
+--         functorVars = argTypesWithParamsAndApps l argTypesWithParams
+--         autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) vars) reqs
+--      in piAllImplicit autoArgs (init' names)
+--   where
+--     dropLastVar : TTImp -> (TTImp,TTImp)
+--     dropLastVar (IApp _ y l) = (y,l)
+--     dropLastVar tt = (tt,tt)
 
 
 export
@@ -196,18 +177,17 @@ makeFParamCon t (MkParamCon name explicitArgs) =
 -- Failure implies its not a `Type -> Type` type
 makeFParamTypeInfo : DeriveUtil -> Maybe FParamTypeInfo
 makeFParamTypeInfo g = do
-    let ps = g.typeInfo.params
-        r = length ps -- bound here to be available for matching ps' right after
-        ps' = toVect r ps
-    Just xs@(_ :: _)      <- pure ps'       | err => Nothing
-    holeType@(_, IType _) <- pure $ last xs | err => Nothing
-    let (h,_) = splitLastVar g.appliedType
-    let z = map (makeFParamCon (fst holeType)) g.typeInfo.cons
-    pure $ MkFParamTypeInfo g.typeInfo.name xs g.appliedType h holeType (fromList z)
+    tiParams@(_ :: _)       <- pure g.typeInfo.params | _ => Nothing
+    let params = Vect.fromList tiParams
+    (holeTypeName, IType _) <- pure $ last params     | _ => Nothing
+    let (oneHoleTT,holeTypeTT) = splitLastVar g.appliedType
+        fpcons = fromList $ makeFParamCon holeTypeName <$> g.typeInfo.cons
+    pure $ MkFParamTypeInfo g.typeInfo.name params g.appliedType oneHoleTT (holeTypeName,holeTypeTT) fpcons
   where
+    -- we've already rejected types without proper params so this should be safe
     splitLastVar : TTImp -> (TTImp,TTImp)
     splitLastVar (IApp _ y l) = (y,l)
-    splitLastVar tt = (tt,tt) -- we've already rejected types without proper params so this should be safe
+    splitLastVar tt = (tt,tt)
 
 data Raf : Type -> Type -> Type where
   -- MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> a -> b) -> Raf a b
@@ -215,10 +195,13 @@ data Raf : Type -> Type -> Type where
   -- MkRaf : a -> b -> Maybe b -> (a,b) -> Raf a b
   MkRaf : a -> b -> Maybe b -> (a -> b) -> (a,b,a,Char) -> (Int -> Bool -> Char) -> Raf a b
 
--- export
--- Show a => Show b => Show (Raf a b) where
-  -- show (MkRaf x y z w f) = "MkRaf \{show x} \{show y} \{show z} \{show w} \{show $ f x}"
-
+export
+oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> FParamTypeInfo -> DeriveUtil -> TTImp
+oneHoleImplementationType iface reqs fp g =
+    let appIface = iface .$ fp.oneHoleType
+        functorVars = argTypesWithParamsAndApps (snd fp.holeType) g.argTypesWithParams
+        autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) fp.oneHoleType) reqs
+     in piAllImplicit autoArgs (toList . map fst $ init fp.params)
 
 data Forf a = MkForf (a -> a)
 Functor Forf where
@@ -297,10 +280,10 @@ FunctorVis vis g = do
         dtName = nameStr $ g.typeInfo.name
     Just fp <- pure $ makeFParamTypeInfo g
       | _ => fail (oneHoleFail iname dtName)
-    when (hasTag fp FunctionFCo) $ fail (contraFail iname dtName) -- reject contravariant uses of the hole type
+    when (fpHasTag fp FunctionFCo) $ fail (contraFail iname dtName) -- reject contravariant uses of the hole type
     pure $ MkInterfaceImpl iname vis []
              (mkFunctorImpl g fp)
-             (oneHoleImplementationType `(Functor) [] g)
+             (oneHoleImplementationType `(Functor) [] fp g)
 
 ||| Alias for `FunctorVis Public`.
 export
@@ -314,9 +297,8 @@ Functor = FunctorVis Public
   neutral = id
 
 public export %inline
-defaultFoldr : (tee : Foldable t) => (func : a -> b -> b) -> (init : b) -> (input : t a) -> b
-defaultFoldr f acc xs = foldMap @{tee} @{Endo} f xs acc
-
+defaultFoldr : Foldable t => (func : a -> b -> b) -> (init : b) -> (input : t a) -> b
+defaultFoldr f acc xs = foldMap @{%search} @{Endo} f xs acc
 
 -- special case for no cons: impossible pattern
 -- special case for phantoms: _ = belive_me, phantoms use their target var nowhere
@@ -372,8 +354,10 @@ FoldableVis vis g = do
         dtName = nameStr $ g.typeInfo.name
     Just fp <- pure $ makeFParamTypeInfo g
       | _ => fail (oneHoleFail iname dtName)
-    when (hasTag fp FunctionFV) $ fail (piFail iname dtName) -- reject uses of the hole type in functions
-    pure $ MkInterfaceImpl iname vis [] (mkFoldableImpl g) (oneHoleImplementationType `(Foldable) [`{Functor}] g)
+    when (fpHasTag fp FunctionFV) $ fail (piFail iname dtName) -- reject uses of the hole type in functions
+    pure $ MkInterfaceImpl iname vis []
+             (mkFoldableImpl g)
+             (oneHoleImplementationType `(Foldable) [] fp g)
 
 ||| Alias for `FoldableVis Public`.
 export
@@ -412,6 +396,14 @@ mkTraversableImpl g = `(MkTraversable
                        (\f => ~(genTraverseTT g (fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params)))
                        )
 
+public export
+getBaseImplementation' : (x : Type) -> Elab x
+getBaseImplementation' implTy = do
+  tpe <- quote implTy
+  let d = `( let x = %search in the ~tpe x )
+  z <- check {expected=implTy} d
+  pure z
+
 ||| Derives a `Traversable` implementation for the given data type
 ||| and visibility.
 export
@@ -421,50 +413,22 @@ TraversableVis vis g = do
         dtName = nameStr $ g.typeInfo.name
     Just fp <- pure $ makeFParamTypeInfo g
       | _ => fail (oneHoleFail iname dtName)
-    when (hasTag fp FunctionFV) $ fail (piFail iname dtName) -- reject uses of the hole type in functions
-    pure $ MkInterfaceImpl iname vis [] (mkTraversableImpl g) (oneHoleImplementationType `(Traversable) [`{Foldable}] g)
+    when (fpHasTag fp FunctionFV) $ fail (piFail iname dtName) -- reject uses of the hole type in functions
+    pure $ MkInterfaceImpl iname vis []
+             (mkTraversableImpl g)
+             (oneHoleImplementationType `(Traversable) [`{Functor},`{Foldable}] fp g)
 
 ||| Alias for `TraversableVis Public`.
 export
 Traversable : DeriveUtil -> Elab InterfaceImpl
 Traversable = TraversableVis Public
 
--- for Foo a = MkFoo a  get con infos
--- filter each con for whether they mention `a` mebership
--- non-mention means we don't mess with it, `id`, use means we apply `f` or `map f` as appropriate
-
--- in Foo2, the type of Foo2 is Type -> Type, the type of MkFoo2 is a -> a -> MkFoo2 a
--- We only want to fucks with types that end in Type -> Type
-
 getStuff : Elaboration m => Name -> m ()
 getStuff n = do
   -- tyinfo <- getInfo' n
   eff <- getParamInfo' n
-  -- logMsg "" 0 (show $ tyinfo.name)
-  -- the pprinter does an assload of nat figuring that shits up the compile time
-  -- logMsg "freaf" 0 $ renderString . layoutPretty defaultLayoutOptions $ (indent 2 $ vsep ["", pretty {ann = ()} eff, "",""])
-  -- let usedArgs = calcArgTypesWithParams eff
-  -- -- logMsg "usedArgs" 0 $ show usedArgs
   let g = genericUtil eff
-  -- -- let b = doFunctor eff g
-  -- let r = oneHoleImplementationType `(Traversable) [`{Foldable}] g
-  -- logMsg "functorTypeR1" 0 $ show r
-  -- let b = implementationType `(Eq) g
   let r = mkTraversableImpl g
-  -- logMsg "functorTypeR2" 0 $ show r
-  -- logMsg "functorTypeT" 0 $ show g.appliedType
-  -- let b = hasOneHoleShape'' g.typeInfo
-  -- let d = fromMaybe "notATraversableType" . map fst $ last' g.typeInfo.params
-  -- logMsg "functorTypeB" 0 $ show b
-
-  -- let z = any (isLastParamInPi (var d)) (concatMap (map tpe . explicitArgs) g.typeInfo.cons)
-  -- logMsg "functorTypeZ" 0 $ show z
-
-  
-  -- logMsg "functorType" 0 $ show eff.name
-  -- logMsg "functorTypePTypes" 0 $ show $ map (show . map paramTypes . explicitArgs) eff.cons
-  -- logMsg "functorTypeTPE" 0 $ show $ map (show . map tpe . explicitArgs) eff.cons
-
   -- logTerm "functorType" 0 "" $ b
   
   pure ()
@@ -475,24 +439,49 @@ data Foo = MkFoo
 data FooEnum = FooEnum1 | FooEnum2 | FooEnum3
 
 data FooA a = MkFooA a
+%runElab derive' `{FooA} [Functor]
+tFooA : let t = (MkFooA 'a') in map Prelude.id t = t
+tFooA = Refl
+
 data FooA' : (x : Type) -> Type where
   MkFooA' : a -> FooA' a
+%runElab derive' `{FooA'} [Functor]
+tFooA' : let t = (MkFooA' 'a') in map Prelude.id t = t
+tFooA' = Refl
 
 data FooA2 a = MkFooA2 | MkFooA2' a
 
+%runElab derive' `{FooA2} [Functor]
+tFooA2 : let t = (MkFooA2' 'c') in map Prelude.id t = t
+tFooA2 = Refl
+
 data FooA3 a = MkFooA3 | MkFooA3' a | MkFooA3'' (FooA3 a)
+
+%runElab derive' `{FooA3} [Functor]
+tFooA3 : let t = (MkFooA3'' (MkFooA3' 'c')) in map Prelude.id t = t
+tFooA3 = Refl
 
 data FooAF : (Type -> Type) -> Type -> Type where
   MkFooAF : a -> FooAF f a
   MkFooAF' : f a -> FooAF f a
   MkFooAF'' : FooAF f a -> FooAF f a
 
-
+%runElab derive' `{FooAF} [Functor]
+tFooAF : let t = (MkFooAF' {f=Maybe} (Just 'c')) in map Prelude.id t = t
+tFooAF = ?sdffd
 
 data FooA4 a = MkFooA4 | MkFooA4' a | MkFooA4'' (FooA3 a) | MkFooA4''' (Either Int (FooA4 a))
 
+%runElab derive' `{FooA4} [Functor]
+tFooA4 : let t = (MkFooA4''' (Right $ MkFooA4'' (MkFooA3' 'c'))) in map Prelude.id t = t
+tFooA4 = Refl
+
 public export
 data FooAK a = MkFooAK
+
+%runElab derive' `{FooAK} [Functor]
+tFooAK : let t = MkFooAK in map Prelude.id t = t
+tFooAK = Refl
 
 public export
 data FooAK2 a b c = MkFooAK2 b
@@ -687,48 +676,8 @@ infoRafF = case makeFParamTypeInfo (genericUtil infoRaf) of
 
 %runElab derive' `{Raf} [Functor]
 
--- Functor (Raf a) where
-  -- map f (MkRaf x) = MkRaf (case x of (t_1,t_2) => (t_1,f t_2))
-
-borb : map {f=Raf Char} S (MkRaf 'a' Z (Just Z) (const Z) ('a',Z,'a','c') (\_,_ => 'f')) = (MkRaf 'a' (S Z) (Just (S Z)) (const (S Z)) ('a',S Z,'a','c') (\_,_ => 'f'))
-borb = Refl
-
-mapId : Functor f => (xs : f a) -> map Prelude.id xs = xs
-mapId xs = let r = map id xs in ?sdffsd
-
-idYes : (x : a) -> id x = x
-idYes x = Refl
-
 borb' : let t = (MkRaf 'a' Z (Just Z) (const Z) ('a',Z,'a','c') (\_,_ => 'f')) in map Prelude.id t = t
 borb' = Refl
-
-export
-infoF5 : TypeInfo
-infoF5 = getInfo "F5"
-
-export
-infoFoo' : TypeInfo
-infoFoo' = getInfo "Foo'"
-
-export
-infoFooA : TypeInfo
-infoFooA = getInfo "FooA"
-
-export
-infoFooAp : ParamTypeInfo
-infoFooAp = getParamInfo "FooA"
-
-export
-infoFooA3 : TypeInfo
-infoFooA3 = getInfo "FooA3"
-
-export
-infoFooA3p : ParamTypeInfo
-infoFooA3p = getParamInfo "FooA3"
-
-export
-infoFooA4 : TypeInfo
-infoFooA4 = getInfo "FooA4"
 
 export
 infoFooA4p : ParamTypeInfo
@@ -742,24 +691,7 @@ export
 infoVoidFoo : ParamTypeInfo
 infoVoidFoo = getParamInfo "VoidFoo"
 
-
--- %runElab getStuff `{F2}
--- %runElab getStuff `{F3}
--- %runElab getStuff `{F4}
--- %runElab getStuff `{F5}
--- %runElab getStuff `{FooAK}
--- %runElab getStuff `{FooAK2}
 -- %runElab getStuff `{VoidFoo}
--- %runElab derive `{Foo2} [Functor]
--- %runElab derive `{FooAK} [Functor]
-
--- %runElab derive `{Foo} [Functor]
--- %runElab derive `{FooEnum} [Functor]
-
--- %runElab getStuff `{F1}
--- %runElab getStuff `{F4}
-
-
 
 data T a = T1 Int a | T2 (T a)
 data S a b = S1 (List b) | S2 (a, b, b)
@@ -793,7 +725,7 @@ infoH = getParamInfo "H"
 data FooAZ : Type -> Type -> (Type -> Type) -> Type where
   MkFooAZ : a -> FooAZ a b f
 
--- %runElab derive' `{F1} [Functor] -- function type
+%runElab derive' `{F1} [Functor] -- function type
 -- %runElab derive' `{F4} [Functor] -- contra
 -- %runElab derive' `{FooAZ} [Functor] -- not (Type -> Type)
 
@@ -804,8 +736,15 @@ data FooAZ : Type -> Type -> (Type -> Type) -> Type where
 -- %runElab derive' `{FooAF} [Foldable]
 -- %runElab derive' `{F2} [Foldable]
 
--- This won't check if Foldable is missing until you use traverse
--- %runElab derive' `{Tree1} [Functor,Foldable,Traversable]
+-- Regrettably, this won't check if Foldable is missing until you use traverse
+%runElab derive' `{Tree1} [Functor,Traversable]
+
+
+-- Foldable Tree1 where
+  -- foldr f acc xs = ?dsfdsffd
+
+-- Traversable Tree1 where
+  -- traverse f x = ?dsfdsffd
 
 -- %runElab derive' `{Tree2} [Foldable]
 -- %runElab derive' `{Tree3} [Foldable]
@@ -814,20 +753,3 @@ data FooAZ : Type -> Type -> (Type -> Type) -> Type where
 -- It won't even error when you use map oddly enough.
 Functor FooA where
   map f (MkFooA x) = MkFooA (f x)
-
-
--- Traversable Tree1 where
---   -- traverse f Leaf1 = [| Leaf1 |]
---   traverse f Leaf1 = pure Leaf1
---   -- traverse f (Branch1 x y z) = [| Branch1 (traverse f x) (f y) (traverse f z) |]
---   traverse f (Branch1 x y z) = pure Branch1 <*> traverse f x <*> f y <*> traverse f z
-
-
-
-
--- Traversable Tree2 where
---   traverse f x = ?dfsdf2
-
--- Traversable Tree3 where
---   traverse f x = ?dfsdf3
-
