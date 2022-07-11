@@ -10,6 +10,10 @@ import Language.Reflection.Derive
 %language ElabReflection
 
 --------------------------------------------------
+-- MkFC regex:
+-- \(MkFC (.*?)(\)\))
+-- \(MkFC (.*?)(\)\))(.*?)(\)\))
+--------------------------------------------------
 
 data FieldTag
   = SkipF -- field to be left alone, either being placed back in as-is (map) or skipped (foldMap)
@@ -47,58 +51,92 @@ record FParamTypeInfo where
 fpHasTag : FParamTypeInfo -> FieldTag -> Bool
 fpHasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
 
+{-
+IApp _ -- potential
+  (IApp _ -- potential
+    (IVar _ (UN (Basic "g"))) -- potential
+    (IApp _ -- potential
+      (IVar _ (UN (Basic "f"))) -- potential
+      (IVar _ (UN (Basic "a"))))) -- potential
+  (IApp _
+    (IVar _ (UN (Basic "h"))) -- potential
+    (IVar _ (UN (Basic "b")))) -- target
+-}
+
+-- TODO, is this good enough? What about some case like:
+-- argTypesWithParamsAndApps (var b) [g (f a) (h b)] = ???
+-- clearly b is used but it's not a direct application.
+-- Observe Fraf below, which does this.
+-- So what I need is to find (h b), like I do anyway, but also then find uses of (h b)
+export
+deepestAp : TTImp -> TTImp
+deepestAp (IApp fc s u) = deepestAp u
+deepestAp tt = tt
+
+-- searchAp : (target : TTImp) -> TTImp -> (TTImp -> b) -> Maybe b
+
+export
+findAp : (targ : TTImp) -> TTImp -> Maybe TTImp
+findAp t (IApp fc s u@(IVar _ _)) = if u == t then Just s else Nothing
+findAp t (IApp fc s u) = IApp fc s <$> findAp t u
+findAp t _ = Nothing
 
 export
 ||| Filter used params for ones that are applied to our `l`ast param
-argTypesWithParamsAndApps : TTImp -> List TTImp -> List TTImp
-argTypesWithParamsAndApps l ss = mapMaybe slice ss
-  where
-    slice : TTImp -> Maybe TTImp
-    slice (IApp fc s u) = if u == l then Just s else Nothing
-    slice _ = Nothing
+||| and also supertypes of those. e.g. g (f a) (h b) implies Functor (g (f a)) and Functor h
+argTypesWithParamsAndApps : (taget : TTImp) -> (params : List TTImp) -> List TTImp
+argTypesWithParamsAndApps l ss = 
+    let b = mapMaybe (findAp l) ss
+        c = concatMap (\t => List.mapMaybe (findAp (deepestAp t)) b) b
+    in map deepestAp b ++ c
 
--- export
--- oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> DeriveUtil -> TTImp
--- oneHoleImplementationType iface reqs (MkDeriveUtil _ appTp names argTypesWithParams) =
---     let (vars,l) = dropLastVar appTp
---         appIface = iface .$ vars
---         functorVars = argTypesWithParamsAndApps l argTypesWithParams
---         autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) vars) reqs
---      in piAllImplicit autoArgs (init' names)
---   where
---     dropLastVar : TTImp -> (TTImp,TTImp)
---     dropLastVar (IApp _ y l) = (y,l)
---     dropLastVar tt = (tt,tt)
+-- TODO, also consider when layering contras makes them non-contra
+-- Does this happen? It sounds familiar
+data Borp : Type -> Type -> Type where
+  MkBorp : (c -> a -> a -> c -> a -> c) -> Borp c a
+Functor (Borp c) where
+  map f (MkBorp g) = MkBorp $ \c => ?dsfsdf
 
+-- TODO As written my machinery fails to find uses of b in Fraf at all!
+
+-- Functor (g (f a)) => Functor h => Functor (Fraf g f h a) where
+--   map d (MkFraf gorp) = MkFraf $ map (map d) gorp
 
 export
+||| Turn any name into a Basic name
 toBasicName : Name -> Name
 toBasicName = UN . Basic . nameStr
 
 export
 toBasicName' : Name -> TTImp
-toBasicName' = var . UN . Basic . nameStr
+toBasicName' = var . toBasicName
 
 export
+||| Determine how nested, by application, our target is.
 countLevels : (target : Name) -> TTImp -> Maybe Nat
 countLevels t (IApp _ s u) = S <$> countLevels t u
 countLevels t (IVar _ nm) = if nm == t then Just 0 else Nothing
 countLevels _ _ = Nothing
 
--- MkFC regex:
--- \(MkFC (.*?)(\)\))
--- \(MkFC (.*?)(\)\))(.*?)(\)\))
-
 export
+||| Apply an arbitrary nesting of TTImps
+||| e.g. appLevels 3 `{k} `(map) = map (map (map k))
 appLevels : Name -> TTImp -> Nat -> TTImp
 appLevels n _  Z = var n
 appLevels n fn (S k) = fn .$ (appLevels n fn k)
 
+iVarAnywhere : (name : Name) -> TTImp -> Bool
+iVarAnywhere n (IVar _ na) = n == na
+iVarAnywhere n (IApp fc s t) = iVarAnywhere n s || iVarAnywhere n t
+iVarAnywhere _ _ = False
+
 export
+||| Is our target parameter in the datatype itself but not in any constructor fields
 isPhantomArg : Name -> DeriveUtil -> Bool
 isPhantomArg arg g = let b = filter (not . isRecursive) . concatMap explicitArgs $ g.typeInfo.cons
                          c = (concatMap paramTypes b)
-                         c' = filter (\case IVar _ na => na == arg; _ => False) c
+                        --  c' = filter (\case IVar _ na => na == arg; _ => False) c
+                         c' = filter (iVarAnywhere arg) c
                    in not $ length c' > 0
 
 ||| Is our target type used in a pi type
@@ -113,23 +151,6 @@ isLeftParamOfPi t (IPi fc rig pinfo mnm argTy retTy) = t == argTy || isLeftParam
 isLeftParamOfPi t (IApp fc s u) = isLeftParamOfPi t s || isLeftParamOfPi t u
 isLeftParamOfPi t tt = False
 
-------------------------------------------------------------
--- Failure reporting
-------------------------------------------------------------
-
-failDerive : (where' : String) -> (why : String) -> String
-failDerive where' why = "Failure deriving \{where'}: \{why}"
-
-piFail : String -> (dtName : String) -> String
-piFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used in a function type."
-
-contraFail : (impl : String) -> (dtName : String) -> String
-contraFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used contravariantly in a function type."
-
-oneHoleFail : (impl : String) -> (dtName : String) -> String
-oneHoleFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its type does not end in Type -> Type."
-
-------------------------------------------------------------
 
 -- Doesn't really need to be Vect given how we use it so far
 export
@@ -146,29 +167,17 @@ unTuple'' tupName tt@(IApp _ (IApp _ (IVar _ nm) l) r) =
     imps => if toBasicName nm == toBasicName tupName then (l :: imps) else imps
 unTuple'' tupName tt = [tt]
 
-tagField : (holeType : Name) -> ExplicitArg -> FieldTag
-tagField t arg = case unTuple' "Pair" arg.tpe of
-  (S (S z) ** xs) => TupleF (S (S z))
-  _               => if isLeftParamOfPi (var t) arg.tpe
-                      then FunctionFCo
-                      else if isLastParamInPi (var t) arg.tpe
-                        then FunctionFV
-                        else case countLevels t arg.tpe of
-                          Nothing => SkipF
-                          Just Z => TargetF
-                          Just n => AppF n
-
 tagField' : (holeType : Name) -> (arg : TTImp) -> FieldTag
 tagField' t arg = case unTuple' "Pair" arg of
   (S (S z) ** xs) => TupleF (S (S z))
   _               => if isLeftParamOfPi (var t) arg
-                      then FunctionFCo
+                      then FunctionFCo -- target is a contravariant argument to a pi type
                       else if isLastParamInPi (var t) arg
-                        then FunctionFV
+                        then FunctionFV -- target is an argument to a pi type
                         else case countLevels t arg of
-                          Nothing => SkipF
-                          Just Z => TargetF
-                          Just n => AppF n
+                          Nothing => SkipF   -- target not in field's type
+                          Just Z  => TargetF -- target is field's only type
+                          Just n  => AppF n  -- target is nested in field's type
 
 makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
 makeFParamCon t (MkParamCon name explicitArgs) =
@@ -189,12 +198,6 @@ makeFParamTypeInfo g = do
     splitLastVar (IApp _ y l) = (y,l)
     splitLastVar tt = (tt,tt)
 
-data Raf : Type -> Type -> Type where
-  -- MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> a -> b) -> Raf a b
-  -- MkRaf : (a,b) -> Raf a b
-  -- MkRaf : a -> b -> Maybe b -> (a,b) -> Raf a b
-  MkRaf : a -> b -> Maybe b -> (a -> b) -> (a,b,a,Char) -> (Int -> Bool -> Char) -> Raf a b
-
 export
 oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> FParamTypeInfo -> DeriveUtil -> TTImp
 oneHoleImplementationType iface reqs fp g =
@@ -203,10 +206,23 @@ oneHoleImplementationType iface reqs fp g =
         autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) fp.oneHoleType) reqs
      in piAllImplicit autoArgs (toList . map fst $ init fp.params)
 
-data Forf a = MkForf (a -> a)
-Functor Forf where
-  map f (MkForf g) = MkForf $ \x => ?dsfsdf_0 -- contra
+------------------------------------------------------------
+-- Failure reporting
+------------------------------------------------------------
 
+failDerive : (where' : String) -> (why : String) -> String
+failDerive where' why = "Failure deriving \{where'}: \{why}"
+
+piFail : String -> (dtName : String) -> String
+piFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used in a function type."
+
+contraFail : (impl : String) -> (dtName : String) -> String
+contraFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its final parameter is used contravariantly in a function type."
+
+oneHoleFail : (impl : String) -> (dtName : String) -> String
+oneHoleFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its type does not end in Type -> Type."
+
+------------------------------------------------------------
 
 appNE : (xs : List a) -> (l : a) -> NonEmpty (xs ++ [l])
 appNE [] l = IsNonEmpty
@@ -423,15 +439,30 @@ export
 Traversable : DeriveUtil -> Elab InterfaceImpl
 Traversable = TraversableVis Public
 
-getStuff : Elaboration m => Name -> m ()
+getStuff : Name -> Elab ()
 getStuff n = do
   -- tyinfo <- getInfo' n
   eff <- getParamInfo' n
   let g = genericUtil eff
-  let r = mkTraversableImpl g
-  -- logTerm "functorType" 0 "" $ b
+  Just fp <- pure $ makeFParamTypeInfo g
+    | _ => fail "no"
+  r <- FunctorVis Public g
+  logTerm "functorType" 0 "" $ impl r
+  logTerm "functorType" 0 "" $ r.type
+  logMsg "wew" 0 $ show fp.params
+
   
   pure ()
+
+data Raf : Type -> Type -> Type where
+  -- MkRaf : a -> b -> Maybe b -> (a,b) -> (a -> a -> b) -> Raf a b
+  -- MkRaf : (a,b) -> Raf a b
+  -- MkRaf : a -> b -> Maybe b -> (a,b) -> Raf a b
+  MkRaf : a -> b -> Maybe b -> (a -> b) -> (a,b,a,Char) -> (Int -> Bool -> Char) -> Raf a b
+
+data Forf a = MkForf (a -> a)
+Functor Forf where
+  map f (MkForf g) = MkForf $ \x => ?dsfsdf_0 -- contra
 
 
 data Foo = MkFoo
@@ -719,13 +750,34 @@ infoH = getParamInfo "H"
 --   fmap f (S1 bs)    = S1 (fmap f bs)
 --   fmap f (S2 (p,q)) = S2 (a, fmap f q)
 
--- %runElab getStuff `{Tree1}
+
+
+data Fraf : (Type -> Type -> Type) -> (Type -> Type) -> (Type -> Type) -> Type -> Type -> Type where
+  MkFraf : (gorp : g (f a) (h b)) -> Fraf g f h a b
+%runElab derive' `{Fraf} [Functor]
+tFraf1 : let t = (MkFraf (Right $ Just 'c'))
+         in  map {f=Fraf Either Maybe Maybe Bool} Prelude.id t = t
+tFraf1 = Refl
+tFraf2 : let t = (MkFraf (Left (Nothing {ty = Bool})))
+         in  map {f=Fraf Either Maybe Maybe Bool} Prelude.id t = t
+tFraf2 = Refl
+
+export
+infoFraf : ParamTypeInfo
+infoFraf = getParamInfo "Fraf"
+
+export
+infoFrafF : FParamTypeInfo
+infoFrafF = case makeFParamTypeInfo (genericUtil infoFraf) of
+            Just x => x
+            Nothing => believe_me 0
+%runElab getStuff `{Fraf}
 
 
 data FooAZ : Type -> Type -> (Type -> Type) -> Type where
   MkFooAZ : a -> FooAZ a b f
 
-%runElab derive' `{F1} [Functor] -- function type
+-- %runElab derive' `{F1} [Functor] -- function type
 -- %runElab derive' `{F4} [Functor] -- contra
 -- %runElab derive' `{FooAZ} [Functor] -- not (Type -> Type)
 
