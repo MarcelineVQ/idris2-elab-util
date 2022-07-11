@@ -6,6 +6,11 @@ import public Language.Reflection.Pretty
 
 -- import Language.Reflection
 
+import Data.Stream
+import Data.String
+
+import Data.SortedMap
+
 import Language.Reflection.Derive
 %language ElabReflection
 
@@ -51,29 +56,10 @@ record FParamTypeInfo where
 fpHasTag : FParamTypeInfo -> FieldTag -> Bool
 fpHasTag fp tag = or $ map (\pc => delay $ any (\(t,_) => sameTag tag t) pc.args) fp.cons
 
-{-
-IApp _ -- potential
-  (IApp _ -- potential
-    (IVar _ (UN (Basic "g"))) -- potential
-    (IApp _ -- potential
-      (IVar _ (UN (Basic "f"))) -- potential
-      (IVar _ (UN (Basic "a"))))) -- potential
-  (IApp _
-    (IVar _ (UN (Basic "h"))) -- potential
-    (IVar _ (UN (Basic "b")))) -- target
--}
-
--- TODO, is this good enough? What about some case like:
--- argTypesWithParamsAndApps (var b) [g (f a) (h b)] = ???
--- clearly b is used but it's not a direct application.
--- Observe Fraf below, which does this.
--- So what I need is to find (h b), like I do anyway, but also then find uses of (h b)
 export
 deepestAp : TTImp -> TTImp
 deepestAp (IApp fc s u) = deepestAp u
 deepestAp tt = tt
-
--- searchAp : (target : TTImp) -> TTImp -> (TTImp -> b) -> Maybe b
 
 export
 findAp : (targ : TTImp) -> TTImp -> Maybe TTImp
@@ -96,11 +82,6 @@ data Borp : Type -> Type -> Type where
   MkBorp : (c -> a -> a -> c -> a -> c) -> Borp c a
 Functor (Borp c) where
   map f (MkBorp g) = MkBorp $ \c => ?dsfsdf
-
--- TODO As written my machinery fails to find uses of b in Fraf at all!
-
--- Functor (g (f a)) => Functor h => Functor (Fraf g f h a) where
---   map d (MkFraf gorp) = MkFraf $ map (map d) gorp
 
 export
 ||| Turn any name into a Basic name
@@ -125,6 +106,7 @@ appLevels : Name -> TTImp -> Nat -> TTImp
 appLevels n _  Z = var n
 appLevels n fn (S k) = fn .$ (appLevels n fn k)
 
+-- alternatively could use calcArgTypesWithParams
 iVarAnywhere : (name : Name) -> TTImp -> Bool
 iVarAnywhere n (IVar _ na) = n == na
 iVarAnywhere n (IApp fc s t) = iVarAnywhere n s || iVarAnywhere n t
@@ -135,7 +117,6 @@ export
 isPhantomArg : Name -> DeriveUtil -> Bool
 isPhantomArg arg g = let b = filter (not . isRecursive) . concatMap explicitArgs $ g.typeInfo.cons
                          c = (concatMap paramTypes b)
-                        --  c' = filter (\case IVar _ na => na == arg; _ => False) c
                          c' = filter (iVarAnywhere arg) c
                    in not $ length c' > 0
 
@@ -183,6 +164,11 @@ makeFParamCon : (holeType : Name) -> ParamCon -> FParamCon
 makeFParamCon t (MkParamCon name explicitArgs) =
   MkFConField name $ map (\r => (tagField' t r.tpe, r)) explicitArgs
 
+spiderBasicNames : TTImp -> TTImp
+spiderBasicNames (IVar fc nm) = IVar fc (toBasicName nm)
+spiderBasicNames (IApp fc l r) = IApp fc (spiderBasicNames l) (spiderBasicNames r)
+spiderBasicNames tt = tt
+
 -- Failure implies its not a `Type -> Type` type
 makeFParamTypeInfo : DeriveUtil -> Maybe FParamTypeInfo
 makeFParamTypeInfo g = do
@@ -198,13 +184,87 @@ makeFParamTypeInfo g = do
     splitLastVar (IApp _ y l) = (y,l)
     splitLastVar tt = (tt,tt)
 
+-- SortedMap has issues reifying the use of lookup :(
+-- NameMap : Type -> Type
+-- NameMap a = SortedMap Name a
+namespace NameMap
+  export
+  NameMap : Type -> Type
+  NameMap a = List (Name,a)
+
+  -- nub gross, but we don't have all that many params to search
+  export
+  insert : Eq a => Name -> a -> NameMap a -> NameMap a
+  insert n1 n2 nm = nub $ (n1,n2) :: nm
+
+  export
+  lookup : Name -> NameMap a -> Maybe a
+  lookup n nm = List.lookup n nm
+  
+  export
+  empty : NameMap a
+  empty = []
+
+  export
+  mapNameMap : (a -> b) -> NameMap a -> NameMap b
+  mapNameMap f nm = Prelude.map (\(x,y) => (x, f y)) nm
+
+  export
+  size : NameMap a -> Nat
+  size = length
+
+  export
+  withStrm : (a -> b -> c) -> NameMap a -> Stream b -> NameMap c
+  withStrm f [] (v :: vs) = []
+  withStrm f ((n,x) :: xs) (v :: vs) = (n, f x v) :: withStrm f xs vs
+
+
+collectNames : NameMap Name -> TTImp -> NameMap Name
+collectNames m (IVar _ nm) = insert nm nm m
+collectNames m (IPi _ rig pinfo mnm argTy retTy)
+  = foldl {t=List} collectNames (maybe m (\n => insert n n m) mnm) [argTy,retTy]
+collectNames m (IApp _ s t) = foldl {t=List} collectNames m [s,t]
+collectNames m _ = m
+
+replaceNames : NameMap Name -> TTImp -> TTImp
+replaceNames m (IVar fc nm) = IVar fc $ fromMaybe nm (lookup nm m)
+replaceNames m (IPi fc rig pinfo mnm argTy retTy)
+  = IPi fc rig pinfo (mnm >>= (`lookup`m)) (replaceNames m argTy) (replaceNames m retTy)
+replaceNames m (IApp fc s t) = IApp fc (replaceNames m s) (replaceNames m t)
+replaceNames m tt = tt
+
+private
+Ord Name where
+  compare x y = compare (nameStr x) (nameStr y)
+
+lappend : List a -> Stream a -> Stream a
+lappend [] ss = ss
+lappend (x :: xs) ss = x :: lappend xs ss
+
+nameSrc : Stream String
+nameSrc = numa nats
+  where
+    alpha : List String
+    alpha = ["a","b","c","d","e"]
+    numa : Stream Nat -> Stream String
+    numa (Z :: ns) = alpha `lappend` numa ns
+    numa (n :: ns) = map (++ show n) alpha `lappend` numa ns
+
+export
+collectAndReplace : TTImp -> TTImp
+collectAndReplace tt =
+    let d = collectNames (empty {a=Name}) tt
+        rs = withStrm (\x,y => case x of MN _ _ => fromString y; _ => x) d nameSrc
+    in  replaceNames rs tt
+
 export
 oneHoleImplementationType : (iface : TTImp) -> (reqImpls : List Name) -> FParamTypeInfo -> DeriveUtil -> TTImp
 oneHoleImplementationType iface reqs fp g =
     let appIface = iface .$ fp.oneHoleType
         functorVars = argTypesWithParamsAndApps (snd fp.holeType) g.argTypesWithParams
         autoArgs = piAllAuto appIface $ map (iface .$) functorVars ++ map (\n => app (var n) fp.oneHoleType) reqs
-     in piAllImplicit autoArgs (toList . map fst $ init fp.params)
+        ty = piAllImplicit autoArgs (toList . map fst $ init fp.params)
+    in collectAndReplace ty
 
 ------------------------------------------------------------
 -- Failure reporting
@@ -223,11 +283,6 @@ oneHoleFail : (impl : String) -> (dtName : String) -> String
 oneHoleFail s dtName = failDerive (s ++ " for \{dtName}") "Can't be derived as its type does not end in Type -> Type."
 
 ------------------------------------------------------------
-
-appNE : (xs : List a) -> (l : a) -> NonEmpty (xs ++ [l])
-appNE [] l = IsNonEmpty
-appNE (x :: xs) l = IsNonEmpty
-
 
 export
 genMapTT : DeriveUtil -> FParamTypeInfo -> (target : Name) -> TTImp
