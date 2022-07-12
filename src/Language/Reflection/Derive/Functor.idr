@@ -93,6 +93,9 @@ export
 toBasicName : Name -> Name
 toBasicName = UN . Basic . nameStr
 
+varStream : String -> Stream Name
+varStream s = map (fromString . ("\{s}_" ++) . show) [the Int 1 ..]
+
 export
 toBasicName' : Name -> TTImp
 toBasicName' = var . toBasicName
@@ -394,26 +397,26 @@ genFoldMapTT g fp t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
       -- split, make new tags for each, doRules on each, combine
       doTuple : TTImp -> (k ** Vect (S (S k)) TTImp) -> TTImp
       doTuple name (k ** fields) =
-            let names = map var $ Stream.take (S (S k)) $ map (fromString . ("t_" ++) . show) [the Int 1 ..]
-                namedTT = zip names fields
-                tagged = zip (map (tagField' (fst fp.holeType)) fields) namedTT
+            let names = map var $ Stream.take (S (S k)) $ varStream "t"
+                tags = map (tagField' (fst fp.holeType)) fields
+                tagged = zip tags names
                 tupL = foldr1 (\n,ns => `(MkPair ~(n) ~ns) ) names
-                tupR = foldl1 (\acc,x => `(~acc <+> ~x)) (map doRule tagged)
+                tupR = foldl1 (\acc,x => `(~acc <+> ~x)) (map (uncurry doRule) tagged)
             in  iCase name `(_) [tupL .= tupR]
 
-      doRule : (FieldTag, TTImp, TTImp) -> TTImp
-      doRule (SkipF, name, tpe) = `(neutral)
-      doRule (TargetF, name, tpe) = `(f ~name)
-      doRule (AppF k, name, tpe) = foldl (\acc,_ => `(foldMap ~acc)) `(f) [1..k] .$ name
-      doRule (TupleF k, name, tpe) = doTuple name k
-      doRule (FunctionFV, name, tpe) = name -- Will not occur for Foldable. How to have compiler guarantee?
-      doRule (FunctionFCo, name, tpe) = name -- Will not occur for Foldable. How to have compiler guarantee?
+      doRule : FieldTag -> TTImp -> TTImp
+      doRule SkipF       name = `(neutral)
+      doRule TargetF     name = `(f ~name)
+      doRule (AppF k)    name = foldl (\acc,_ => `(foldMap ~acc)) `(f) [1..k] .$ name
+      doRule (TupleF k)  name = doTuple name k
+      doRule FunctionFV  name = name -- Will not occur for Foldable. How to have compiler guarantee?
+      doRule FunctionFCo name = name -- Will not occur for Foldable. How to have compiler guarantee?
 
     lhss : Vect cc FParamCon -> Vect cc TTImp
     lhss = map (\pc => appNames pc.name (map (toBasicName . name . snd) pc.args))
 
     rhss : Vect cc FParamCon -> Vect cc TTImp
-    rhss = map (\pc => case (map (\(tag, arg) => doRule (tag, toBasicName' arg.name, arg.tpe)) pc.args) of
+    rhss = map (\pc => case (map (\(tag, arg) => doRule tag (toBasicName' arg.name)) pc.args) of
                          [] => `(neutral) -- case to avoid repeating work, e.g. neutral <+> ...
                          (r :: rs) => foldl (\acc,x => `(~acc <+> ~x)) r rs)
 
