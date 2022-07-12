@@ -390,29 +390,21 @@ genFoldMapTT g fp t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
                              then [impossibleClause `(_)]
                              else clauses)
   where
-    doPi : TTImp -> TTImp -> TTImp
-    doPi name tt = case unPi tt of
-                (x, y) => let names = map (fromString . ("p_" ++) . show) [1 .. length x]
-                              args = zip names x
-                          in  foldr (\(n,arg),tt => lambdaArg n .=> tt) (var "f" .$ foldl (.$) name (map var names)) args
-
     mutual
-      -- split, make new tags for each, doRules on each, recombine
+      -- split, make new tags for each, doRules on each, combine
       doTuple : TTImp -> (k ** Vect (S (S k)) TTImp) -> TTImp
       doTuple name (k ** fields) =
-            let names = Stream.take (S (S k)) $ map (fromString . ("t_" ++) . show) [the Int 1 ..]
-                namedTT = zip (map var names) fields
+            let names = map var $ Stream.take (S (S k)) $ map (fromString . ("t_" ++) . show) [the Int 1 ..]
+                namedTT = zip names fields
                 tagged = zip (map (tagField' (fst fp.holeType)) fields) namedTT
-            in case (init tagged, last tagged) of
-                  (xs, (ltag,ln,lt)) =>
-                    let tupL = foldr (\n,ns => `(MkPair ~(n) ~ns) ) ln (map (fst . snd) xs)
-                        tupR = foldr (\(tag,n,t),tt => `(MkPair) .$ (doRule (tag,n,t)) .$ tt) (doRule (ltag,ln,lt)) xs
-                    in  iCase name `(_) [tupL .= tupR]
+                tupL = foldr1 (\n,ns => `(MkPair ~(n) ~ns) ) names
+                tupR = foldl1 (\acc,x => `(~acc <+> ~x)) (map doRule tagged)
+            in  iCase name `(_) [tupL .= tupR]
 
       doRule : (FieldTag, TTImp, TTImp) -> TTImp
       doRule (SkipF, name, tpe) = `(neutral)
-      doRule (TargetF, name, tpe) = appLevels "f" `(foldMap) Z .$ name
-      doRule (AppF k, name, tpe) = appLevels "f" `(foldMap) k .$ name
+      doRule (TargetF, name, tpe) = `(f ~name)
+      doRule (AppF k, name, tpe) = foldl (\acc,_ => `(foldMap ~acc)) `(f) [1..k] .$ name
       doRule (TupleF k, name, tpe) = doTuple name k
       doRule (FunctionFV, name, tpe) = name -- Will not occur for Foldable. How to have compiler guarantee?
       doRule (FunctionFCo, name, tpe) = name -- Will not occur for Foldable. How to have compiler guarantee?
@@ -422,7 +414,7 @@ genFoldMapTT g fp t = if isPhantomArg t g && length (g.typeInfo.cons) > 0
 
     rhss : Vect cc FParamCon -> Vect cc TTImp
     rhss = map (\pc => case (map (\(tag, arg) => doRule (tag, toBasicName' arg.name, arg.tpe)) pc.args) of
-                         [] => `(neutral)
+                         [] => `(neutral) -- case to avoid repeating work, e.g. neutral <+> ...
                          (r :: rs) => foldl (\acc,x => `(~acc <+> ~x)) r rs)
 
     clauses : List Clause
@@ -896,7 +888,7 @@ data FooAZ : Type -> Type -> (Type -> Type) -> Type where
 -- %runElab derive' `{FooAZ} [Functor] -- not (Type -> Type)
 
 
--- %runElab derive' `{FooA} [Foldable,Traversable]
+%runElab derive' `{FooA} [Foldable,Traversable]
 -- %runElab derive' `{FooA'} [Foldable]
 -- %runElab derive' `{FooA2} [Foldable]
 -- %runElab derive' `{FooA3} [Foldable]
@@ -907,9 +899,16 @@ data FooAZ : Type -> Type -> (Type -> Type) -> Type where
 data Bobo : (Type -> Type) -> Type -> Type -> Type where
   MkBobo : (a -> f b) -> Bobo f a b
 
+-- next type to explore, one pi is applied recheck the rules
+data BoboT : (Type -> Type) -> Type -> Type -> Type where
+  MkBoboT : (f b, b, f a) -> BoboT f a b
+
 %runElab getStuff `{Bobo}
 -- %runElab derive' `{Bobo} [Functor,Foldable,Traversable]
 %runElab derive' `{Bobo} [Functor]
+
+%runElab getStuff `{BoboT}
+%runElab derive' `{BoboT} [Foldable]
 
 -- Regrettably, this won't check if Foldable is missing until you use traverse
 -- %runElab getStuff `{Tree1}
